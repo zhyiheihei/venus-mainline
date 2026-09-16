@@ -2,7 +2,6 @@
 # 前提:M1 内核可引导、M2 UFS 确认后,rootfs 落 userdata,内核经 boot_b 引导
 {
   lib,
-  modulesPath,
   ...
 }:
 {
@@ -10,15 +9,22 @@
   # boot.kernelPackages = pkgs.linuxPackages_custom;
 
   # 高通 arm64 移植期标配 bootargs;UART console 仅在接了拆机测试点时有效
+  # ramoops(pstore)依赖 DTS reserved-memory 节点,M1 时在内核侧落地
   boot.kernelParams = [
     "clk_ignore_unused"
     "pd_ignore_unused"
     "console=ttyMSM0,115200n8"
+    "pstore.backend=ramoops"
   ];
 
-  # 崩溃日志抢救(无串口调试的主要手段)
-  # 需要内核 DTS 里配好 ramoops reserved-memory,数值在 M1 定
-  boot.pstore.enable = lib.mkDefault true;
+  # 引导不走常规 bootloader:内核+dtb+initramfs 打包 boot.img 由高通 ABL 引导
+  boot.loader.grub.enable = false;
+
+  # M2 UFS 实测后换成真实 UUID;当前仅占位求值
+  fileSystems."/" = {
+    device = lib.mkDefault "/dev/disk/by-uuid/00000000-0000-0000-0000-000000000000";
+    fsType = lib.mkDefault "ext4";
+  };
 
   # TODO(M3): USB gadget configfs(NCM 网卡 usb0 + ACM 串口 ttyGS0)
   # TODO(M3): /etc/systemd/network USB NCM 口 DHCP + 主机侧 NAT 文档

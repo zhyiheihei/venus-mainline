@@ -1,0 +1,4 @@
+backup/
+result
+result-*
+.direnv/

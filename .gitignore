@@ -1,4 +1,11 @@
 backup/
+rom/
+kernel/linux-7.2.6/
+kernel/linux-build/
+kernel/*.tar.xz
+kernel/busybox-aarch64
+kernel/initramfs/bin/
+kernel/result-*
 result
 result-*
 .direnv/

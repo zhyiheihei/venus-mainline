@@ -26,7 +26,6 @@
             packages = with pkgs; [
               # 内核构建(host 侧工具)
               dtc
-              ubootTools # mkimage
               openssl
               ncurses # menuconfig
               flex
@@ -38,13 +37,10 @@
               rsync
               # aarch64 交叉工具链
               pkgsCross.aarch64-multiplatform.buildPackages.gcc
-              # 刷机与调试
-              android-tools # fastboot / adb
+              # 刷机用系统 PATH 里的 fastboot/adb,不重复打包
               # 固件与参考资料处理
               jq
               curl
-              # pmOS 对照(查 pmaports 补丁与 DTS 写法)
-              pmbootstrap
             ];
           };
         };

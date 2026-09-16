@@ -22,9 +22,9 @@
 
 | 里程碑 | 内容 | 验收 |
 | --- | --- | --- |
-| M0 | 备份原厂 boot/dtbo/vbmeta/vendor_boot;备 LOS 完整 fastboot 包 | backup/ 下分区镜像齐全(不入 git) |
+| M0 | 电脑备一份 LOS venus 完整 fastboot 包(或小米线刷包);不做分区备份 | ROM 包在盘 |
 | M1 | mainline 内核 + sagami DTS 起步改造,`fastboot boot` 引导 | initramfs 里 USB 网络可用,可进 debug shell |
-| M2 | UFS 实测:只读确认分区、检查稳定性 | 决定落盘策略(boot_b + userdata) |
+| M2 | UFS 实测:只读确认分区、检查稳定性 | 具备落盘条件 |
 | M3 | NixOS rootfs + USB NCM + SSH | headless 可用,`nixos-rebuild` 闭环 |
 | M4 | USB 转以太网网卡 | 独立联网保底 |
 | M5 | WiFi:等 sm8350-hdk WiFi 补丁进主线,写 venus 供电/PCIe DTS,从 LOS 固件包提取 boardfile | wpa_supplicant 关联成功 |
@@ -34,11 +34,11 @@
 
 ## 红线(守住则永远不需要 9008)
 
-绝不 flash:`xbl*`、`xbl_config*`、`abl`、`tz`、`hyp`、`keymaster`、`devcfg`、`cmnlib*`、`qupfw`、`imagefv`、GPT 分区表。
+绝不 flash:`xbl*`、`xbl_config*`、`abl`、`tz`、`hyp`、`keymaster`、`devcfg`、`cmnlib*`、`qupfw`、`imagefv`、`persist`、`modemst1/2`、GPT 分区表。这些里 persist/modemst 不可再生,其余在 ROM 包里都有镜像。
 
 可折腾:`boot_a/b`、`dtbo_a/b`、`vendor_boot_a/b`、`vbmeta_a/b`(带 `--disable-verity --disable-verification`)、`userdata`。
 
-日常测试用 `fastboot boot boot.img`(内存引导,零永久风险),验证通过才落盘 `boot_b`,`boot_a` 常留安卓。
+日常测试用 `fastboot boot boot.img`(内存引导,零永久风险)。单系统策略:不留原厂,userdata 全量给 rootfs,boot 分区随便用;ROM 包即全量回退手段。
 
 ## 目录
 
@@ -48,7 +48,8 @@
 | `kernel/` | mainline 内核构建(patch 集与 config,M1 落地) |
 | `firmware/` | 固件提取说明(M5 落地) |
 | `docs/porting-notes.md` | 移植日志 |
-| `backup/` | 原厂分区备份(git 忽略) |
+
+ROM 包存本机不入 git。不做分区备份(2026-09 决策:不留原系统,可写分区均可从 ROM 包再生)。
 
 ## 参考
 

@@ -4,14 +4,9 @@
 
 ## M0 · 待开始
 
-备份清单(venus 分区名,安卓 root 下 `dd` 后 `adb pull` 到 `backup/`):
+不做分区备份(2026-09 决策:不留原系统)。理由:可能改写的 boot/dtbo/vbmeta/vendor_boot/userdata 在 LOS fastboot 包与小米线刷包里都有现成镜像,可随时重刷;不可再生的 persist/modemst 在红线清单内永不触碰。
 
-- boot_a boot_b
-- dtbo_a dtbo_b
-- vbmeta_a vbmeta_b
-- vendor_boot_a vendor_boot_b
-
-另备:小米11 官方线刷包 或 LOS venus 完整 fastboot 包(存电脑,不入 git)。
+唯一准备项:电脑备一份 LOS venus 完整 fastboot 包(或小米线刷包),即全量回退手段。
 
 ## 当前已确认的关键事实
 

@@ -1,0 +1,41 @@
+#!/bin/sh
+# venus M1 bring-up init:USB gadget(NCM 网络 + ACM 串口)拿到两条 shell 通道
+export PATH=/bin:/sbin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
+mount -t configfs none /sys/kernel/config 2>/dev/null
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+echo "=== venus bring-up initramfs ==="
+
+# UFS 探测(只看不挂)
+echo "--- block devices ---"
+ls -l /dev/sda* /dev/nvme* 2>/dev/null || echo "no UFS/NVMe nodes yet"
+
+# USB gadget:NCM + ACM
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p "$G"
+echo 0x18d1 > "$G/idVendor"
+echo 0x4ee1 > "$G/idProduct"
+mkdir -p "$G/strings/0x409" "$G/configs/c.1"
+echo "venus-bringup" > "$G/strings/0x409/product"
+mkdir "$G/functions/ncm.usb0" "$G/functions/acm.ttyGS0" 2>/dev/null
+ln -s "$G/functions/ncm.usb0" "$G/configs/c.1/f1"
+ln -s "$G/functions/acm.ttyGS0" "$G/configs/c.1/f2"
+UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+if [ -n "$UDC" ]; then
+	echo "$UDC" > "$G/UDC"
+else
+	echo "WARN: no UDC device"
+fi
+
+ip link set usb0 up 2>/dev/null
+ip addr add 10.15.0.2/24 dev usb0 2>/dev/null
+telnetd -l /bin/sh 2>/dev/null || echo "WARN: no telnetd in busybox"
+setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' &
+
+echo "up: telnet 10.15.0.2 (host: ip 10.15.0.1) or /dev/ttyACM0"
+exec sh

@@ -9,3 +9,4 @@ kernel/result-*
 result
 result-*
 .direnv/
+kernel/venus-boot.img

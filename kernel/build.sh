@@ -58,11 +58,15 @@ make -C "$WORK/$K" O="$OUT" ARCH=$ARCH CROSS_COMPILE="$CC" -j"${MAKE_JOBS:-10}" 
 
 # 6. 打包 boot.img(v4,内嵌 initramfs,无外部 ramdisk)
 gzip -9kf "$OUT/arch/arm64/boot/Image"
-python3 venus/mkbootimg.py \
+MKBOOTIMG="$HOME/.cache/mkbootimg/mkbootimg.py"
+[ -f "$MKBOOTIMG" ] || git clone --depth 1 \
+	https://android.googlesource.com/platform/system/tools/mkbootimg \
+	"$HOME/.cache/mkbootimg"
+PYTHONPATH="$HOME/.cache/mkbootimg" python3 "$MKBOOTIMG" \
 	--header_version 4 \
 	--kernel "$OUT/arch/arm64/boot/Image.gz" \
 	--dtb "$OUT/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb" \
-	--os-version 12 --os-patch-level 2022-05-05 \
+	--os_version 12 --os_patch_level 2022-05-05 \
 	--cmdline "clk_ignore_unused pd_ignore_unused rdinit=/init" \
 	--output "$ROOT/venus-boot.img"
 

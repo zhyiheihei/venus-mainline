@@ -40,12 +40,15 @@
 	};
 
 	reserved-memory {
-		/* 位置照搬 sagami;是否与 venus 实际保留区冲突待实测 */
-		ramoops@ffc00000 {
+		/* 小米真实 ramoops(来自 EvoX vendor_boot DTB): 0xa9000000/2MB。
+		 * 布局改为 console+records+pmsg: 我们的内核写 panic log,
+		 * EvoX(槽位b) 的 /dev/pmsg0 能原样读到 region 内容 → 无 root 可观测 */
+		ramoops@a9000000 {
 			compatible = "ramoops";
-			reg = <0 0xffc00000 0 0x100000>;
-			console-size = <0x40000>;
+			reg = <0 0xa9000000 0 0x200000>;
+			console-size = <0x100000>;
 			record-size = <0x1000>;
+			pmsg-size = <0xff000>;
 			no-map;
 		};
 	};

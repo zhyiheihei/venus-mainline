@@ -1,21 +1,29 @@
 #!/bin/sh
-# venus M1 bring-up init:USB gadget(NCM 网络 + ACM 串口)拿到两条 shell 通道
+# venus M1 init v4: 黑匣子 + 永不自杀
+# - ramoops 已改到真地址 0xa9000000 (EvoX /dev/pmsg0 可读全文)
+# - 不再 reboot -f (不烧槽位 tries), 无 UDC 则永久驻留等待
 export PATH=/bin:/sbin
 
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
+K() { echo "venus-init: $*" > /dev/kmsg 2>/dev/null; echo "venus-init: $*"; }
+
+K "=== init v4 start ==="
 mount -t configfs none /sys/kernel/config 2>/dev/null
-mkdir -p /dev/pts
-mount -t devpts devpts /dev/pts
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
 
-echo "=== venus bring-up initramfs ==="
+# 上一轮现场 (console-ramoops 在 0xa9000000)
+if ls /sys/fs/pstore/console-ramoops* >/dev/null 2>&1; then
+  K "=== PREVIOUS BOOT TAIL ==="
+  K "$(tail -c 300 /sys/fs/pstore/console-ramoops* 2>/dev/null | tr '\n' '|')"
+else
+  K "no ramoops visible"
+fi
 
-# UFS 探测(只看不挂)
-echo "--- block devices ---"
-ls -l /dev/sda* /dev/nvme* 2>/dev/null || echo "no UFS/NVMe nodes yet"
+K "block: $(ls /dev/sda* 2>/dev/null | tr '\n' ' ') | udc: $(ls /sys/class/udc 2>/dev/null | tr '\n' ' ')"
 
-# USB gadget:NCM + ACM
 G=/sys/kernel/config/usb_gadget/g1
 mkdir -p "$G"
 echo 0x18d1 > "$G/idVendor"
@@ -23,19 +31,34 @@ echo 0x4ee1 > "$G/idProduct"
 mkdir -p "$G/strings/0x409" "$G/configs/c.1"
 echo "venus-bringup" > "$G/strings/0x409/product"
 mkdir "$G/functions/ncm.usb0" "$G/functions/acm.ttyGS0" 2>/dev/null
-ln -s "$G/functions/ncm.usb0" "$G/configs/c.1/f1"
-ln -s "$G/functions/acm.ttyGS0" "$G/configs/c.1/f2"
-UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-if [ -n "$UDC" ]; then
-	echo "$UDC" > "$G/UDC"
-else
-	echo "WARN: no UDC device"
-fi
+K "functions: $(ls $G/functions/ 2>/dev/null | tr '\n' ' ')"
+ln -sf "$G/functions/ncm.usb0" "$G/configs/c.1/f1" 2>/dev/null
+ln -sf "$G/functions/acm.ttyGS0" "$G/configs/c.1/f2" 2>/dev/null
+
+# 无限耐心等 UDC
+T=0
+while :; do
+  UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+  if [ -n "$UDC" ]; then
+    if echo "$UDC" > "$G/UDC" 2>/dev/null; then break; fi
+  fi
+  sleep 2
+  T=$((T+2))
+  if [ $((T % 20)) -eq 0 ]; then
+    K "waiting udc (${T}s); dwc3 nodes: $(ls /sys/bus/platform/devices/ | grep -c a6)"
+  fi
+done
+K "UDC BOUND after ${T}s: $UDC"
 
 ip link set usb0 up 2>/dev/null
 ip addr add 10.15.0.2/24 dev usb0 2>/dev/null
-telnetd -l /bin/sh 2>/dev/null || echo "WARN: no telnetd in busybox"
-setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' &
+telnetd -l /bin/sh 2>/dev/null && K "telnetd up"
+(
+  while :; do
+    setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'
+    sleep 2
+  done
+) &
+K "=== UP: telnet 10.15.0.2 / ttyACM0 ==="
 
-echo "up: telnet 10.15.0.2 (host: ip 10.15.0.1) or /dev/ttyACM0"
-exec sh
+while :; do sleep 3600; done

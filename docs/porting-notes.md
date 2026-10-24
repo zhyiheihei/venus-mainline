@@ -94,3 +94,10 @@ mount/dd/ip/telnetd/dmesg/reboot 全是 busybox applet, 不 install 就不存在
 - v15: busybox --install 修复(本次根因) + init 语法修正, 待刷
 - 状态机备忘: 刷 X 后引导验证只烧一次; 读日志 = 引导 v1x 写 misc → 刷 EvoX boot →
   reboot recovery → sideload 读 misc 打屏(venus-init 行数>0 即成功)
+
+## 2026-10-24 深夜二 · v15 循环未解, misc 日志通道建成, 交接
+
+- v15(busybox --install + watchdog + cmdline 三连)仍 ~90s panic 循环 → 根因未知, **但 v15 死前的 dmesg 已由 init 每 15s 写入 misc 偏移 4KB 起**
+- 读取工具链已建成: rd14(打印 misc 日志精华 ~15 行)在 Windows C:\Users\<windows-user>\mi11\; 流程见 docs/HANDOFF.md 第四节
+- 完整交接文档: **docs/HANDOFF.md**(设备状态/已证事实/坑位清单/下一步路线), 新 agent 从那里开始
+- 本日新增实证: fastboot continue 仅新鲜会话可靠; recovery/sideload ui_print 不回流 adb; recovery 无 /dev/mem 且 sysfs block 被锁; by-name 解析可用; BCB boot-recovery 在小米 ABL 上无效; VMware 抢 Windows USB 总线需重插

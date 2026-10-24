@@ -61,3 +61,36 @@
 - 引导验证 = flash + set_active + continue 一气呵成, **只引导一次**; 引导失败优先恢复 pmsg0 证据, 禁止无证据重试。
 - 不在手机上做任何"试试看"式的连续实验; 每个动作先写进 notes 预期结果。
 - 官方恢复路径: EvoX 官方 First Time Install (本文记录) 永远有效, 资产常备 `~/mi11-work/`。
+
+## 2026-10-24 深夜 · 借鉴 pdx206-mainline 的关键发现(同 SM8350 平台成功移植)
+
+来源: https://github.com/terminal-index/pdx206-mainline (Sony Xperia 5 II, SM8350, mainline 成功移植全套文档)
+
+### 致命 bug(我们的): init 缺 `busybox --install -s /bin`
+
+pdx206 init 的第一步就是它。我们的 initramfs 只有 /bin/busybox + /bin/sh,
+mount/dd/ip/telnetd/dmesg/reboot 全是 busybox applet, 不 install 就不存在:
+- `mount -t configfs` → not found 静默失败 → configfs 从未挂载 → UDC 永远不出现(USB 之谜真凶)
+- `dd` → 不存在 → misc/尾部日志永远空(rd9-rd12 全 0 行的原因)
+- `reboot` → 不存在 → v12 的 74s 回 fastboot 实为 PMIC 硬件看门狗超时, 非我们的 beacon
+- v3 当年"能启动"是因为 init v1 只用了 echo/sleep 等 builtin, 碰巧活到了 exec sh
+
+### pdx206 经验清单(逐条对照我们)
+
+1. cmdline 三连必须加: `regulator_ignore_unused pd_ignore_unused clk_ignore_unused`
+   - 无面板/音频驱动的最小 initramfs, 内核 ~30s 后 regulator_late_cleanup 会关掉
+     未认领电源轨(USB PHY 的 vdda 也在内) → I2C/USB 全挂 → 无 panic 死机
+2. 硬件看门狗: XBL 启动即开 ~32s 倒计时, 必须有狗不喂就硬复位(无 panic 无 ramoops)
+   - 修: CONFIG_QCOM_WDT=y + init 里 `busybox watchdog -t 5 /dev/watchdog &` 兜底
+3. Hybrid DTB: 主线 DTB + 厂商 DTB 拼接成 pool, ABL 验厂商的, 内核选自己的
+   - venus 变体: 我们用 vendor_boot 装小米 DTB + boot 装主线内核, 同效
+4. USB 网络用 RNDIS+172.16.42.x(pmOS 标准), 宿主机跑 auto_ip 循环自动配 IP
+5. init 顺序: busybox --install → kmsg banner → 挂 proc/sys/dev/pts → loglevel 7 →
+   gadget → watchdog → 等存储 → 挂 root → switch_root; 失败进 rescue shell
+
+### v14/v15 修复内容
+
+- v14: QCOM_WDT=y + init watchdog 兜底 + cmdline 三连(已刷, 但 init 的 sed 语法错 &; 未验)
+- v15: busybox --install 修复(本次根因) + init 语法修正, 待刷
+- 状态机备忘: 刷 X 后引导验证只烧一次; 读日志 = 引导 v1x 写 misc → 刷 EvoX boot →
+  reboot recovery → sideload 读 misc 打屏(venus-init 行数>0 即成功)

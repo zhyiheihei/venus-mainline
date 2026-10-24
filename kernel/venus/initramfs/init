@@ -4,13 +4,19 @@
 # - 不再 reboot -f (不烧槽位 tries), 无 UDC 则永久驻留等待
 export PATH=/bin:/sbin
 
+# pdx206 同款第一步: 释放 busybox 全部 applet(mount/dd/ip/telnetd 否则不存在!)
+busybox --install -s /bin
+
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
 K() { echo "venus-init: $*" > /dev/kmsg 2>/dev/null; echo "venus-init: $*"; }
 
 K "=== init v4 start ==="
+if [ -c /dev/watchdog ]; then (watchdog -t 5 /dev/watchdog &) ; K "watchdog pet started"; fi
+mkdir -p /sys/kernel/config
 mount -t configfs none /sys/kernel/config 2>/dev/null
+K "configfs: $(mount | grep -c configfs) mounted"
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
 mount -t pstore pstore /sys/fs/pstore 2>/dev/null
 
@@ -22,7 +28,57 @@ else
   K "no ramoops visible"
 fi
 
+# 上一轮现场: /dev/pmsg0 = 2MB 内存环(温重启不丢), 立即抄进 UFS 尾部
+sleep 3
+if [ -c /dev/pmsg0 ]; then
+  K "pmsg0 present, archiving previous boot log"
+  SZ0=$(cat /sys/class/block/sda34/size 2>/dev/null)
+  if [ -n "$SZ0" ]; then
+    tail -c 500000 /dev/pmsg0 > /tmp/prev.log 2>/dev/null
+    SZ=$(cat /sys/class/block/sda34/size 2>/dev/null)
+    dd if=/tmp/prev.log of=/dev/block/sda34 bs=512 seek=$((SZ-1024)) conv=notrunc 2>/dev/null
+    K "prev log archived to ufs tail ($?)"
+  else
+    K "no sda34 size - ufs not probed?"
+  fi
+else
+  K "no pmsg0"
+fi
 K "block: $(ls /dev/sda* 2>/dev/null | tr '\n' ' ') | udc: $(ls /sys/class/udc 2>/dev/null | tr '\n' ' ')"
+
+# 时间信标: init 活着 → 45s 后确定性 reboot(fastboot 可观测);
+# 现场快照遍历所有块设备的 LBA0(不假设 userdata 名称)
+(
+  sleep 2
+  {
+    echo "=== VENUS MARKER v12 $(date) ==="
+    echo "block devs: $(ls /dev/sd* /dev/mmcblk* 2>/dev/null | tr '\n' ' ')"
+    echo "udc: $(ls /sys/class/udc 2>/dev/null | tr '\n' ' ')"
+    echo "configfs mounts: $(mount | grep -c configfs)"
+    dmesg | tail -40
+    echo "=== END MARKER ==="
+  } > /tmp/marker.txt 2>&1
+  for B in /dev/sd[a-z] /dev/sd[a-z][a-z] /dev/mmcblk*; do
+    [ -b "$B" ] || continue
+    dd if=/tmp/marker.txt of=$B bs=4096 seek=0 conv=notrunc 2>/dev/null
+  done
+  sleep 43
+  K "BEACON: 45s reached, rebooting now"
+  sync
+  reboot -f
+  
+) &
+
+# UFS 日志通道 v2: misc 分区偏移 4KB 起(BCB 之后), F2FS 永不碰
+(
+  sleep 5
+  while :; do
+    dmesg > /tmp/d.log 2>/dev/null
+    echo "venus-init: logdump t=${T}s alive" >> /tmp/d.log
+    dd if=/tmp/d.log of=/dev/block/by-name/misc bs=1024 seek=4 conv=notrunc 2>/dev/null
+    sleep 15
+  done
+) &
 
 G=/sys/kernel/config/usb_gadget/g1
 mkdir -p "$G"

@@ -346,8 +346,13 @@
 };
 
 &usb_1_dwc3 {
-	/* 移植期只做 device(gadget 网络连电脑);host 模式 M4 再开 */
+	/* 移植期只做 device(gadget 网络连电脑);host 模式 M4 再开。
+	 * USB2-only: 组合 QMP PHY 的 DP 半边需要 DISPCC(未编)，探测即炸(v5 秒 panic 实证)，
+	 * 故禁用 qmpphy 并把 dwc3 的 phys 缩到 qusb2 单 PHY */
 	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
 };
 
 &usb_1_hsphy {
@@ -359,8 +364,6 @@
 };
 
 &usb_1_qmpphy {
-	status = "okay";
-
-	vdda-phy-supply = <&vreg_l1b_0p88>;
-	vdda-pll-supply = <&vreg_l6b_1p2>;
+	/* DP 资源缺失会导致 QMP 组合驱动 panic，USB2 走 qusb2 即可，M6 亮屏时再启用 */
+	status = "disabled";
 };

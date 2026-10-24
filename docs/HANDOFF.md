@@ -2,6 +2,17 @@
 
 > 最后更新: 2026-10-24 深夜。前任 agent 调试了一整天的状态全部在此。
 > 先读完本文档和 docs/porting-notes.md 再动手。手机状态每次操作前必须与用户确认。
+>
+> ⚠️ **可信度警告**: 前任 agent 在本次调试中产出过多个后来被证伪的结论(电池论/尺寸论/header论/QMP论/BCB论),
+> 均已记录在 docs/porting-notes.md「误判记录」。本文档已按置信度分级标注,
+> 但**铁律是: 任何叙述都可用一条命令重新验证(验证命令已附), 验证优先于信任叙述**。
+> 对无验证命令支撑的推断(标 🔶), 当作假设而非事实。
+
+## 〇、置信度分级说明
+
+- ✅ = 直接多次观测/带验证命令, 可直接采信(但仍建议首次使用时重新验证)
+- 🔶 = 推断或单次观测, 使用前必须自行重新验证
+- ❌ = 前任的错误结论, 已被证伪, 列出仅供避免重蹈
 
 ## 一、当前设备状态（已验证）
 
@@ -13,19 +24,26 @@
 
 ## 二、手机现在的引导资产
 
-- boot_a = **EvoX 官方 boot.img**（能正常开机进系统）
-- vendor_boot_a = **EvoX 官方 vendor_boot**（含小米完整 DTB 7.9MB + EvoX ramdisk）
+- boot_a = **EvoX 官方 boot.img**（能正常开机进系统）✅ 验证: `fastboot getvar current-slot` + EvoX 能启动
+- vendor_boot_a = **EvoX 官方 vendor_boot**（含小米完整 DTB 7.9MB + EvoX ramdisk）✅ 同上
 - 我们的内核在 `~/mi11-work/images/venus-boot-v15.img`（header v3，11.8MB，内嵌 initramfs）
+  🔶 注意: v15 镜像里的 initramfs 是否真的包含修复后的 init(busybox --install), 构建时序上应该包含但未端到端验证——misc 读出的日志会直接回答(init 是否能跑 dd/mount)
 
-## 三、已确证的事实（每条都有实证，勿再怀疑）
+## 三、已确证的事实（✅=直接多次观测 / 🔶=推断待验）
 
-1. **venus 的 ABL 不支持 `fastboot boot`（内存引导）**：收镜像后静默不执行，header v2/v3/v4 都一样。只能 `flash + set_active + continue`。
-2. **主线内核 7.2.6 能在 venus 启动到 initramfs 用户态**：v3/v12 两次实证（v12 用 45s 时间信标精确回 fastboot 验证）。
-3. **主线内核下 USB UDC 从未出现过**：v3→v15 全部如此。v15 已修 `busybox --install`（见下），仍 ~90s panic 循环——**真正死因在 v15 的 misc 日志里，尚未读取**。
-4. **历史误诊已排除**：不是电池、不是 header 版本、不是下载大小、不是 QMP PHY 内建本身（v11 QMP=m 仍循环）。
-5. **真正的历史根因之一（已修）**：init 缺 `busybox --install -s /bin`，导致 mount/dd/ip/telnetd/reboot 全部不存在 → configfs 从未挂载、日志从未落盘。来源: pdx206-mainline 项目（github.com/terminal-index/pdx206-mainline，同 SoC 成功移植，必读）。
-6. **PD 三个 cmdline 参数必须加**（pdx206 Phase 4）：`regulator_ignore_unused pd_ignore_unused clk_ignore_unused`——否则 ~30s 时 regulator_late_cleanup 关掉未认领电源轨（含 USB PHY 供电）→ 无 panic 死机。v15 已加。
-7. **PMIC 硬件看门狗**：XBL 启动即开 ~32s 倒计时，没人喂就无 panic 硬复位。修: `CONFIG_QCOM_WDT=y`（v14 起）+ init 里 `busybox watchdog -t 5 /dev/watchdog &` 兜底。v15 已加。
+1. ✅ **venus 的 ABL 不支持 `fastboot boot`（内存引导）**：v2/v3/v4 三种 header 均静默不执行。验证: 任一次 `fastboot boot X.img` rc=0 但无任何后续。
+2. ✅ **主线内核 7.2.6 能启动到 initramfs 用户态**：v12 用 45s 时间信标精确回 fastboot 验证(74s 总耗时=引导+信标)。
+3. 🔶 **主线内核下 USB UDC 从未出现过**：从未在手机内部直接观测过(没有日志通道), 仅由「Windows 无 NCM 网卡」推断。**misc 日志(第四节)读出后此条升级为实证或被推翻。**
+4. ✅ **PMIC 硬件看门狗存在且 ~32s 超时**: pdx206 文档记载 + 我们 v12 的 74s 回 fastboot 与之兼容(也可能是 beacon, 二者在本轮实验中不可区分, 但喂狗无害)。
+5. ✅ **v13+ 的 init 会把 dmesg 写进 misc 偏移 4KB 起**: 代码在 kernel/venus/initramfs/init 里可见; 但**写入是否成功从未被读取验证过**(rd12 的输出用户未转述即丢失)。rd14 读取就是验证本身。
+6. 🔶 **`busybox --install -s /bin` 缺失**导致 applet 全不存在: initramfs 只有 busybox+sh 两个文件是 ✅ 直接验证过的; 但「因此 mount/dd 全部失败」是推断(未在手机上直接观测过报错)。
+7. ❌ **已被证伪、勿再采信的旧结论**(详见 porting-notes 误判记录):
+   - 电池/电量问题(用户从未拆机, 满电)
+   - "下载尺寸超限"是真实尺寸问题(实为断连假错误, 192MB flash 实测可行)
+   - header 版本导致 Load Error(v3/v15 同为 v3 header, 一个成功一个循环)
+   - QMP PHY 内建本身导致 panic(v11 QMP=m 仍循环)
+   - BCB boot-recovery 能让小米 ABL 自动进 sideload(实测直落 fastboot)
+   - "v12 的 74s 回 fastboot = 我们的时间信标"(也可能是看门狗, 见第 4 条)
 
 ## 四、🔴 第一优先任务：读取 v15 的 misc 日志
 
@@ -58,6 +76,7 @@ v15 引导存活 ~90s，init 每 15 秒把 dmesg 写进 **misc 分区偏移 4KB 
 ## 六、下一步路线（读完成 misc 日志之后）
 
 1. 从 dmesg 定位 UDC 不出现/panic 的真因，修 init 或内核配置 → v16
+   - 参考命令行参数依据: pdx206 Phase 4 (regulator_ignore_unused pd_ignore_unused clk_ignore_unused), 对 venus 未单独验证过有效性, 但加上了无害
 2. M1 验收: Windows 出现 NCM 网卡 → `ip addr add 10.15.0.1/24` → `telnet 10.15.0.2`（init 里有 telnetd）→ shell
 3. M2: UFS 实测（init 已有探测代码）
 4. M3: NixOS rootfs（参考 chayleaf OnePlus 6 博客 + pmOS sm8250 kernel 包）

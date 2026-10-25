@@ -1,120 +1,117 @@
 #!/bin/sh
-# venus M1 init v4: 黑匣子 + 永不自杀
-# - ramoops 已改到真地址 0xa9000000 (EvoX /dev/pmsg0 可读全文)
-# - 不再 reboot -f (不烧槽位 tries), 无 UDC 则永久驻留等待
-export PATH=/bin:/sbin
+# venus initramfs /init  —— 双系统引导
+#
+# 优先级:
+#   1) /dev/sda34  ext4 标签 nixos   → NixOS（/nix 存在且 /sbin/init 存在）
+#   2) /dev/sda29  ext4 标签 venusroot → Alpine 救援系统（/venus-root 标记）
+#   3) 都失败 → 在内存里起一份 Alpine（保证任何情况下都能调）
+BB=/bin/busybox
 
-# pdx206 同款第一步: 释放 busybox 全部 applet(mount/dd/ip/telnetd 否则不存在!)
-busybox --install -s /bin
+$BB --install -s /bin 2>/dev/null
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /newroot /tmp 2>/dev/null
 
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || mdev -s
-K() { echo "venus-init: $*" > /dev/kmsg 2>/dev/null; echo "venus-init: $*"; }
 
-K "=== init v4 start ==="
-if [ -c /dev/watchdog ]; then (watchdog -t 5 /dev/watchdog &) ; K "watchdog pet started"; fi
-mkdir -p /sys/kernel/config
-mount -t configfs none /sys/kernel/config 2>/dev/null
-K "configfs: $(mount | grep -c configfs) mounted"
-mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
-mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+# ---- 在 initramfs 里就把 USB ACM 串口建起来 ----
+# 目的: 让 console=ttyGS0 能挂上，这样系统切进 NixOS 之后
+#       systemd 的输出也能从串口看到（否则 NixOS 起不来时完全瞎）。
+setup_acm() {
+  mount -t configfs none /sys/kernel/config 2>/dev/null
+  UDC=$($BB ls /sys/class/udc 2>/dev/null | $BB head -1)
+  [ -n "$UDC" ] || return 1
+  G=/sys/kernel/config/usb_gadget/venus
+  $BB mkdir -p "$G" "$G/strings/0x409" "$G/configs/c.1/strings/0x409" 2>/dev/null
+  echo 0x18d1 > "$G/idVendor" 2>/dev/null
+  echo 0x4ee1 > "$G/idProduct" 2>/dev/null
+  echo 0x0100 > "$G/bcdDevice" 2>/dev/null
+  echo 0x0200 > "$G/bcdUSB" 2>/dev/null
+  echo venus-m1 > "$G/strings/0x409/serialnumber" 2>/dev/null
+  echo Xiaomi > "$G/strings/0x409/manufacturer" 2>/dev/null
+  echo venus > "$G/strings/0x409/product" 2>/dev/null
+  echo ACM > "$G/configs/c.1/strings/0x409/configuration" 2>/dev/null
+  echo 250 > "$G/configs/c.1/MaxPower" 2>/dev/null
+  $BB mkdir -p "$G/functions/acm.GS0" 2>/dev/null
+  $BB ln -sf "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" 2>/dev/null
+  echo "$UDC" > "$G/UDC" 2>/dev/null
+  return $?
+}
+setup_acm && echo "[initramfs] USB ACM 串口已就绪: /dev/ttyGS0"
 
-# 上一轮现场 (console-ramoops 在 0xa9000000)
-if ls /sys/fs/pstore/console-ramoops* >/dev/null 2>&1; then
-  K "=== PREVIOUS BOOT TAIL ==="
-  K "$(tail -c 300 /sys/fs/pstore/console-ramoops* 2>/dev/null | tr '\n' '|')"
-else
-  K "no ramoops visible"
-fi
-
-# 上一轮现场: /dev/pmsg0 = 2MB 内存环(温重启不丢), 立即抄进 UFS 尾部
-sleep 3
-if [ -c /dev/pmsg0 ]; then
-  K "pmsg0 present, archiving previous boot log"
-  SZ0=$(cat /sys/class/block/sda34/size 2>/dev/null)
-  if [ -n "$SZ0" ]; then
-    tail -c 500000 /dev/pmsg0 > /tmp/prev.log 2>/dev/null
-    SZ=$(cat /sys/class/block/sda34/size 2>/dev/null)
-    dd if=/tmp/prev.log of=/dev/block/sda34 bs=512 seek=$((SZ-1024)) conv=notrunc 2>/dev/null
-    K "prev log archived to ufs tail ($?)"
-  else
-    K "no sda34 size - ufs not probed?"
-  fi
-else
-  K "no pmsg0"
-fi
-K "block: $(ls /dev/sda* 2>/dev/null | tr '\n' ' ') | udc: $(ls /sys/class/udc 2>/dev/null | tr '\n' ' ')"
-
-# 时间信标: init 活着 → 45s 后确定性 reboot(fastboot 可观测);
-# 现场快照遍历所有块设备的 LBA0(不假设 userdata 名称)
-(
-  sleep 2
-  {
-    echo "=== VENUS MARKER v12 $(date) ==="
-    echo "block devs: $(ls /dev/sd* /dev/mmcblk* 2>/dev/null | tr '\n' ' ')"
-    echo "udc: $(ls /sys/class/udc 2>/dev/null | tr '\n' ' ')"
-    echo "configfs mounts: $(mount | grep -c configfs)"
-    dmesg | tail -40
-    echo "=== END MARKER ==="
-  } > /tmp/marker.txt 2>&1
-  for B in /dev/sd[a-z] /dev/sd[a-z][a-z] /dev/mmcblk*; do
-    [ -b "$B" ] || continue
-    dd if=/tmp/marker.txt of=$B bs=4096 seek=0 conv=notrunc 2>/dev/null
-  done
-  sleep 43
-  K "BEACON: 45s reached, rebooting now"
-  sync
-  reboot -f
-  
-) &
-
-# UFS 日志通道 v2: misc 分区偏移 4KB 起(BCB 之后), F2FS 永不碰
-(
-  sleep 5
-  while :; do
-    dmesg > /tmp/d.log 2>/dev/null
-    echo "venus-init: logdump t=${T}s alive" >> /tmp/d.log
-    dd if=/tmp/d.log of=/dev/block/by-name/misc bs=1024 seek=4 conv=notrunc 2>/dev/null
-    sleep 15
-  done
-) &
-
-G=/sys/kernel/config/usb_gadget/g1
-mkdir -p "$G"
-echo 0x18d1 > "$G/idVendor"
-echo 0x4ee1 > "$G/idProduct"
-mkdir -p "$G/strings/0x409" "$G/configs/c.1"
-echo "venus-bringup" > "$G/strings/0x409/product"
-mkdir "$G/functions/ncm.usb0" "$G/functions/acm.ttyGS0" 2>/dev/null
-K "functions: $(ls $G/functions/ 2>/dev/null | tr '\n' ' ')"
-ln -sf "$G/functions/ncm.usb0" "$G/configs/c.1/f1" 2>/dev/null
-ln -sf "$G/functions/acm.ttyGS0" "$G/configs/c.1/f2" 2>/dev/null
-
-# 无限耐心等 UDC
-T=0
-while :; do
-  UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-  if [ -n "$UDC" ]; then
-    if echo "$UDC" > "$G/UDC" 2>/dev/null; then break; fi
-  fi
-  sleep 2
-  T=$((T+2))
-  if [ $((T % 20)) -eq 0 ]; then
-    K "waiting udc (${T}s); dwc3 nodes: $(ls /sys/bus/platform/devices/ | grep -c a6)"
-  fi
+# 等 UFS 探测完成（QMP PHY probe 异步）
+i=0
+while [ $i -lt 20 ]; do
+  [ -b /dev/sda34 ] && break
+  $BB sleep 1
+  i=$((i+1))
 done
-K "UDC BOUND after ${T}s: $UDC"
 
-ip link set usb0 up 2>/dev/null
-ip addr add 10.15.0.2/24 dev usb0 2>/dev/null
-telnetd -l /bin/sh 2>/dev/null && K "telnetd up"
-(
-  while :; do
-    setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1'
-    sleep 2
-  done
-) &
-K "=== UP: telnet 10.15.0.2 / ttyACM0 ==="
+boot_nixos() {
+  mount -t ext4 -o rw /dev/sda34 /newroot 2>/dev/null || return 1
+  # NixOS 的系统入口不是 /sbin/init, 而是 system profile 里的 init。
+  # 注意: profile 里的符号链接是**绝对路径**(/nix/store/...), 直接在新根外面测
+  # `-x /newroot/.../system/init` 会被内核解析到 initramfs 自己的 /nix 上而失败,
+  # 必须手工顺着两级链接解析。
+  prof=$(readlink /newroot/nix/var/nix/profiles/system 2>/dev/null)
+  sysp=$(readlink "/newroot/nix/var/nix/profiles/$prof" 2>/dev/null)
+  if [ -z "$sysp" ] || [ ! -x "/newroot$sysp/init" ]; then
+    echo "[initramfs] NixOS 系统链接解析失败 (prof=$prof sysp=$sysp)"
+    umount /newroot 2>/dev/null
+    return 1
+  fi
+  echo "[initramfs] NixOS 系统: $sysp"
+  echo "[initramfs] NixOS 根已挂载, 准备 switch_root"
 
-while :; do sleep 3600; done
+  # NixOS stage-1 会做的事: 把 /run /dev/pts /dev/shm /sys/fs/cgroup 备好
+  mkdir -p /newroot/run /newroot/dev/pts /newroot/dev/shm /newroot/tmp 2>/dev/null
+  mount --move /dev /newroot/dev 2>/dev/null
+  mount --move /proc /newroot/proc 2>/dev/null
+  mount --move /sys /newroot/sys 2>/dev/null
+  mount -t tmpfs -o mode=0755 tmpfs /newroot/run 2>/dev/null
+  mount -t devpts devpts /newroot/dev/pts 2>/dev/null
+  mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /newroot/dev/shm 2>/dev/null
+  mount -t cgroup2 none /newroot/sys/fs/cgroup 2>/dev/null
+
+  # 把 busybox 和引导包装脚本写进 NixOS 根(ext4, switch_root 之后仍然在)，
+  # 目的是让系统阶段的输出全部打到串口，并且 systemd 失败时能落进救援 shell。
+  $BB cp $BB /newroot/venus-busybox 2>/dev/null
+  chmod +x /newroot/venus-busybox 2>/dev/null
+  cat > /newroot/venus-boot.sh <<'EOSH'
+#!/venus-busybox sh
+/venus-busybox --install -s /venus-bin 2>/dev/null
+export PATH=/venus-bin:/run/current-system/sw/bin:/usr/bin:/bin
+exec 0</dev/ttyGS0 1>/dev/ttyGS0 2>&1 || exec 1>/dev/console 2>&1
+echo
+echo "=== VENUS: 进入 NixOS 系统阶段 ==="
+echo "profile: $(readlink /nix/var/nix/profiles/system)"
+( /venus-busybox dmesg 2>/dev/null | tail -5 ) 
+echo "--- 启动 systemd ---"
+/nix/var/nix/profiles/system/init
+rc=$?
+echo "!!! systemd 退出/失败, 状态码 $rc"
+echo "--- 落到救援 shell (WiFi 未起时从这里诊断) ---"
+exec /venus-busybox sh -i
+EOSH
+  chmod +x /newroot/venus-boot.sh 2>/dev/null
+
+  exec switch_root /newroot /venus-boot.sh
+}
+
+boot_alpine() {
+  mount -t ext4 -o rw /dev/sda29 /newroot 2>/dev/null || return 1
+  if [ -f /newroot/venus-root ] && [ -x /newroot/bin/busybox ]; then
+    mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/tmp /newroot/run 2>/dev/null
+    mount --move /dev /newroot/dev 2>/dev/null
+    mount --move /proc /newroot/proc 2>/dev/null
+    mount --move /sys /newroot/sys 2>/dev/null
+    exec switch_root /newroot /venus-init.disk
+  fi
+  umount /newroot 2>/dev/null
+  return 1
+}
+
+boot_nixos || boot_alpine || true
+
+# 兜底: 内存里的 Alpine（/venus-init-ram 会拉起同样的调试通道）
+exec /venus-init-ram

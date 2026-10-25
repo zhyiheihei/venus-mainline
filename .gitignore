@@ -10,3 +10,4 @@ result
 result-*
 .direnv/
 kernel/venus-boot.img
+nixos/firmware/

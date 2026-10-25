@@ -22,8 +22,15 @@ for f in a660_gmu.bin a660_sqe.fw a660_zap.b00 a660_zap.b01 a660_zap.b02 a660_za
 done
 
 # 3) 蓝牙（WCN6851）：bluetooth 分区（FAT）image/ 下
+# 芯片 ROM 版本可能是 0x10 或 0x21：把两套都放上，并同时提供 wcnhpnv*/hpnv* 两种命名
 if [ -d "$work/btfw" ]; then
-  cp "$work/btfw/hpbtfw21.tlv" "$work/btfw/hpnv21g.bin" "$out/qca/" 2>/dev/null || true
+  cp "$work"/btfw/hpbtfw*.tlv "$out/qca/" 2>/dev/null || true
+  for f in "$work"/btfw/hpnv*; do
+    [ -e "$f" ] || continue
+    b=$(basename "$f")
+    cp "$f" "$out/qca/$b"
+    cp "$f" "$out/qca/wcn$b"
+  done
 fi
 
 echo "固件已就绪: $out"

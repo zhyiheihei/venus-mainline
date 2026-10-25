@@ -16,7 +16,10 @@ elif [[ "$dst" == */ ]] || ssh venus "test -d '$dst'" 2>/dev/null; then
   echo "已推送 -> venus:$dst/$base"
 else
   tdir=$(dirname "$dst")
-  tmpname=".vpush.$base"
-  tar -C "$dir" -cf - "$base" | timeout 1800 ssh venus "mkdir -p '$tdir' && tar -xf - -C '$tdir' && mv -f '$tdir/$base' '$dst'"
+  if [ "$tdir/$base" = "$dst" ]; then
+    tar -C "$dir" -cf - "$base" | timeout 1800 ssh venus "mkdir -p '$tdir' && tar -xf - -C '$tdir'"
+  else
+    tar -C "$dir" -cf - "$base" | timeout 1800 ssh venus "mkdir -p '$tdir' && tar -xf - -C '$tdir' && mv -f '$tdir/$base' '$dst'"
+  fi
   echo "已推送 -> venus:$dst"
 fi

@@ -1221,7 +1221,6 @@
 		gpio = <&tlmm 64 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
-		regulator-always-on;
 		startup-delay-us = <200000>;
 	};
 
@@ -1233,7 +1232,6 @@
 		gpio = <&tlmm 65 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
-		regulator-always-on;
 	};
 };
 
@@ -1244,6 +1242,95 @@
 
 &gpu_zap_shader {
 	firmware-name = "a660_zap.mdt";
+};
+
+/* ---- 蓝牙: WCN6851 on uart18 ---- */
+&qupv3_id_2 {
+	status = "okay";
+};
+
+&tlmm {
+	venus_bt_uart_pins: venus-bt-uart-pins {
+		pins = "gpio68", "gpio69", "gpio70", "gpio71";
+		function = "qup18";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+&uart18 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&venus_bt_uart_pins>;
+
+	bluetooth {
+		compatible = "qcom,wcn6855-bt";
+		/* 电源轨已由 venus-wifi-power 在运行时打开(wlan/bt 共用),
+		 * 这里挂一个 always-on 的 fixed 稳压器满足驱动的 bulk_get */
+		vddio-supply = <&bt_vreg>;
+		vddbtcxmx-supply = <&bt_vreg>;
+		vddrfacmn-supply = <&bt_vreg>;
+		vddrfa0p8-supply = <&bt_vreg>;
+		vddrfa1p7-supply = <&bt_vreg>;
+		vddrfa1p2-supply = <&bt_vreg>;
+	};
+};
+
+/* ---- wlan_en / bt_en 的运行时开关(套一层 regulator-output 才有可写 state) ---- */
+/ {
+	wlan_en_ctl: regulator-wlan-en-ctl {
+		compatible = "regulator-output";
+		regulator-name = "wlan_en_ctl";
+		vout-supply = <&wlan_en>;
+		regulator-boot-on;
+	};
+
+	bt_en_ctl: regulator-bt-en-ctl {
+		compatible = "regulator-output";
+		regulator-name = "bt_en_ctl";
+		vout-supply = <&bt_en>;
+		regulator-boot-on;
+	};
+};
+
+/* ---- 显示: mdss / dsi0 / dsi0_phy / 面板 ---- */
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l6b_1p2>;
+	status = "okay";
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l5b_0p88>;
+	status = "okay";
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&venus_panel_in>;
+	data-lanes = <0 1 2 3>;
+	/* 命令模式面板由 MDP 的 vsync 当 TE（上游 sdm845 机型同样做法） */
+	qcom,te-source = "mdp_vsync_e";
+};
+
+&mdss_dsi0 {
+	panel@0 {
+		compatible = "xiaomi,venus-k2";
+		reg = <0>;
+
+		reset-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
+
+		vddio-supply = <&vreg_l12c_1p8>;
+		vdd-supply = <&vreg_l13c_3p0>;
+
+		port {
+			venus_panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
 };
 
 /* ---- WiFi 电源: 运行时开关(regulator-userspace-consumer) ---- */
@@ -1283,6 +1370,13 @@
 		regulator-boot-on;
 	};
 
+	bt_vreg: regulator-bt-vreg {
+		compatible = "regulator-fixed";
+		regulator-name = "bt_vreg";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
 };
 
 /* ---- 阶段2: 只保留 UFS/USB2/稳压器/tlmm/串口/屏幕日志, 其余逐步再开 ---- */

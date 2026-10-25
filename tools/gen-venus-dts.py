@@ -207,6 +207,120 @@ def convert(stage):
 };
 '''
 
+    # 6g) 蓝牙: WCN6851 挂在 uart18(qupv3 SE18, 0x890000, pins gpio68-71)。
+    #     板级数据来自 Android 运行时 DTB 的 bluetooth(qos,bt-vdd-* 配置)。
+    s = s.rstrip() + '''
+
+/* ---- 蓝牙: WCN6851 on uart18 ---- */
+&qupv3_id_2 {
+	status = "okay";
+};
+
+&tlmm {
+	venus_bt_uart_pins: venus-bt-uart-pins {
+		pins = "gpio68", "gpio69", "gpio70", "gpio71";
+		function = "qup18";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+&uart18 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&venus_bt_uart_pins>;
+
+	bluetooth {
+		compatible = "qcom,wcn6855-bt";
+		/* 电源轨已由 venus-wifi-power 在运行时打开(wlan/bt 共用),
+		 * 这里挂一个 always-on 的 fixed 稳压器满足驱动的 bulk_get */
+		vddio-supply = <&bt_vreg>;
+		vddbtcxmx-supply = <&bt_vreg>;
+		vddrfacmn-supply = <&bt_vreg>;
+		vddrfa0p8-supply = <&bt_vreg>;
+		vddrfa1p7-supply = <&bt_vreg>;
+		vddrfa1p2-supply = <&bt_vreg>;
+	};
+};
+'''
+
+
+    # wlan_en / bt_en 只保留 boot-on：always-on 会让 sysfs 无法写 state，
+    # 而这两根 GPIO 正是给 WCN 芯片做复位的手段（运行时实验必须能拨动）。
+    def _drop_always_on(text, name):
+        m = _re.search(r'(\n\t%s: regulator-[a-z-]+ \{)(.*?)(\n\t\};)' % name, text, _re.S)
+        if not m:
+            return text
+        body = m.group(2).replace('\n\t\tregulator-always-on;', '')
+        return text[:m.start(2)] + body + text[m.end(2):]
+
+    for _n in ('wlan_en', 'bt_en'):
+        s = _drop_always_on(s, _n)
+
+    # wlan_en / bt_en 的 regulator-fixed 只有只读 state；要运行时拨 GPIO 必须套一层
+    # regulator-output(即 regulator-userspace-consumer)，它才有可写的 state。
+    s = s.rstrip() + """
+
+/* ---- wlan_en / bt_en 的运行时开关(套一层 regulator-output 才有可写 state) ---- */
+/ {
+	wlan_en_ctl: regulator-wlan-en-ctl {
+		compatible = "regulator-output";
+		regulator-name = "wlan_en_ctl";
+		vout-supply = <&wlan_en>;
+		regulator-boot-on;
+	};
+
+	bt_en_ctl: regulator-bt-en-ctl {
+		compatible = "regulator-output";
+		regulator-name = "bt_en_ctl";
+		vout-supply = <&bt_en>;
+		regulator-boot-on;
+	};
+};
+"""
+    # 6h) 显示：mdss + dsi0 + dsi0_phy + 面板（K2，1440x3200 DSC 命令模式）
+    s = s.rstrip() + """
+
+/* ---- 显示: mdss / dsi0 / dsi0_phy / 面板 ---- */
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l6b_1p2>;
+	status = "okay";
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l5b_0p88>;
+	status = "okay";
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&venus_panel_in>;
+	data-lanes = <0 1 2 3>;
+	/* 命令模式面板由 MDP 的 vsync 当 TE（上游 sdm845 机型同样做法） */
+	qcom,te-source = "mdp_vsync_e";
+};
+
+&mdss_dsi0 {
+	panel@0 {
+		compatible = "xiaomi,venus-k2";
+		reg = <0>;
+
+		reset-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
+
+		vddio-supply = <&vreg_l12c_1p8>;
+		vdd-supply = <&vreg_l13c_3p0>;
+
+		port {
+			venus_panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+"""
     # 6e) WiFi 电源: **不**在设备树里强制常开(实测把 s11/s12 常开会开机挂死),
     #     改用 regulator-userspace-consumer, 开机后可在 /sys 里逐个打开,
     #     配合 pcie 的 unbind/bind 做运行时试验, 不需要反复刷机。
@@ -229,7 +343,15 @@ def convert(stage):
             '\t\tvout-supply = <&%s>;\n'
             '\t\tregulator-boot-on;\n'
             '\t};\n\n' % (name, name, name, label))
-    extra += '};\n'
+    extra += (
+        '\tbt_vreg: regulator-bt-vreg {\n'
+        '\t\tcompatible = "regulator-fixed";\n'
+        '\t\tregulator-name = "bt_vreg";\n'
+        '\t\tregulator-min-microvolt = <1800000>;\n'
+        '\t\tregulator-max-microvolt = <1800000>;\n'
+        '\t\tregulator-always-on;\n'
+        '\t};\n')
+    extra += '};\n' 
     s = s.rstrip() + '\n' + extra
 
     off = [n for n in STAGE1_OFF if not (stage >= 2 and n in STAGE2_ON)]

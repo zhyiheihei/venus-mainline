@@ -670,3 +670,111 @@ ssh venus "dd if=/root/boot.img of=/dev/sde38 bs=1M && reboot"
   `tools/extract-firmware.sh` 从本机 `~/mi11-work/{mdm,vfw,btfw}` 重新生成
 - NixOS 配置在 `nixos/configuration.nix`，部署用 `tools/deploy-nixos.sh [switch|boot]`
 - 设备侧留了回滚镜像 `/root/boot-good-nixos.img`、内核镜像 `/root/b{84..90}.img`
+
+## 2026-10-25 · 蓝牙（WCN6851）推进到 hci0，但 UART 没通
+
+### 已确认的事实
+
+1. **BT 挂在 uart18**（= qupv3 SE18 / qupv3_id_2，物理 0x890000），
+   pins: CTS=gpio68 / RTS=gpio69 / TX=gpio70 / RX=gpio71，function `qup18`。
+   依据：Android 运行时 DTB 里 `qupv3_se18_4uart: qcom,qup_uart@890000` 且 `status="ok"`
+   （这是整机唯一一个 okay 的 4-wire UART，就是给 BT 的）。
+2. **geni-serial 必须给 alias**，否则 `qcom_geni_serial 890000.serial: Invalid line -19`
+   （驱动用 `of_alias_get_id("serial")` 决定 ttyGS/ttyMSM 编号）。加 `aliases { serial1 = &uart18; }` 后
+   `/sys/bus/serial/devices/serial0-0` 出现，`hci0` 也随之注册。
+3. **驱动要的固件名**（`btqca.c`）：TLV 先试 `qca/wcnhpbtfw<rom>.tlv` 再试 `qca/hpbtfw<rom>.tlv`；
+   NVM 是 `qca/wcnhpnv<rom><variant>[.b<boardid>]`，GlobalFoundries 芯片 variant=`g`。
+   这台机器 ROM 版本报的是 **0x10**，所以需要 `hpbtfw10.tlv` / `hpnv10*.bin`（不是 21）。
+   固件来源：EvoX 的 `bluetooth` 分区（FAT），`image/` 下有 hpbtfw10/21 + 55 个 hpnv10.*。
+
+### 现在的现象（不是"没通"，是"通了一半"）
+
+```
+hci0 已注册；boot 时:
+  bluetooth hci0: Direct firmware load for qca/hpbtfw10.tlv failed with error -2
+运行中 unbind/bind hci_uart_qca 后:
+  Bluetooth: hci0: setting up wcn6855
+  Bluetooth: hci0: command 0xfc00 tx timeout        ← UART 上的 HCI 命令没有回应
+  Bluetooth: hci0: Reading QCA version information failed (-110)
+```
+
+两个独立问题：
+- 启动时固件加载失败（-2）：`firmware_class.path` 在 BT probe(33s) 时还没指向含 `.zst` 的目录。
+  已把 `firmware_class.path=/run/current-system/firmware` 写进 cmdline 并在 preinit 里再设一次，
+  但 NixOS 的 udev 规则随后会覆盖成 store 路径（两者都含文件，仍需实测确认时序）。
+- UART 没有数据往返（tx timeout）：说明 4-wire 配置还不对（可能需要 `qcom,wakeup-byte`、
+  硬件流控 RTS/CTS、或 BT 使能/睡眠时钟的时序），这是下一步要查的点。
+
+### 操作纪律（这次踩的坑）
+
+- 一次重启循环事故：把 112 个固件文件塞进 NixOS 配置后 `nixos-rebuild switch` + `reboot -f`，
+  设备进入循环。恢复办法是重刷最近一版可用 boot.img（v92）+ `set_active b` 后正常启动。
+  **结论：蓝牙这类"换数据"的实验，先在运行时验证（改 `firmware_class.path` 指向临时目录、
+  `unbind/bind`），不要直接进系统 generation。**
+- `ssh venus` 挂在 `Server accepts key` 之后不动，是 ssh-agent 的问题，
+  `~/.ssh/config` 里加 `IdentityAgent none` 解决。
+
+## 2026-10-25 · 蓝牙（WCN6851）暂停，留档待续
+
+状态：**hci0 能注册，但芯片不回 HCI 命令**。
+
+已确证的事实（下次接手直接用）：
+- BT 走 **uart18 = qupv3 SE18（0x890000）**，pins：gpio68 CTS / gpio69 RFR(RTS) / gpio70 TX / gpio71 RX；
+  `gpioinfo -c gpiochip5` 里名字就是 `HST_BT_UART_*`，`HST_SW_CTRL`=gpio153。
+- geni-serial 必须 `aliases { serial1 = &uart18; }`，否则 `qcom_geni_serial 890000.serial: Invalid line -19`，
+  整条 UART 不注册、`/sys/bus/serial/devices/serial0-0` 不出现。
+- DT 节点（已写进生成器）：`&uart18 { status="okay"; bluetooth { compatible="qcom,wcn6855-bt"; ... } }`
+- **上游驱动支持的属性**（`hci_qca.c` 2478-2500 行）：`enable-gpios`（驱动自己做低 50ms→高 50ms 复位脉冲）、
+  `swctrl-gpios`（读 SW_CTRL 判断芯片状态）、`max-speed`。已加进 DTS 并打包成 v98，**但没刷进去验证**。
+- 固件名规则（`btqca.c`）：TLV 先 `qca/wcnhpbtfw<rom>.tlv` 后 `qca/hpbtfw<rom>.tlv`；
+  NVM 是 `qca/wcnhpnv<rom><variant>[.b<boardid>]`，GlobalFoundries 芯片 variant=`g`。
+  本机 ROM 版本报 **0x10**（不是 21），所以要用 `hpbtfw10.tlv` + `hpnv10.*`。
+- 固件来源：EvoX 的 `bluetooth` 分区（FAT，用 mtools 读 `image/`），已由 `tools/extract-firmware.sh` 导出 112 个文件。
+
+未解决的观察：即使做了「共享电源轨断电 + BT_EN 复位脉冲」，芯片仍然 `command 0xfc00 tx timeout`（-110）。
+下次可试的方向：① 先刷 v98 用上游 `enable-gpios`/`swctrl-gpios` 机制；
+② 检查是否需要 `firmware-name` 直接指定、以及 `.tlv` 是否需要非压缩副本（内核 fw loader 的 .zst 分支）；
+③ 用 `gpioset` 直接驱动 68-71 做回环测试，确认 TX 物理上真的到芯片。
+
+## 2026-10-25 · GPU（Adreno 660）跑通 —— 有量化数据
+
+结论：**GPU 完全可用**（内核 + Vulkan + OpenGL 三层都实测通过）。
+
+关键证据：
+```
+# 内核侧
+/sys/kernel/debug/dri/1/gpu:  gpu-initialized: 1   revision: 660 (06060001)   ringbuffer 存在
+dmesg: adreno loaded qcom/a660_sqe.fw, qcom/a660_gmu.bin → "Loaded GMU firmware v3.1.10"
+dpu hardware revision: 0x70000000
+
+# Vulkan（turnip）
+deviceName = Turnip Adreno (TM) 660
+driverName = turnip Mesa driver   driverInfo = Mesa 26.2.5
+
+# OpenGL（freedreno）
+EGL vendor: Mesa Project / 1.5      OpenGL core renderer: FD660  version 4.6
+OpenGL ES 3.2 Mesa 26.2.5          renderer: FD660
+
+# 基准
+glmark2-es2-gbm --off-screen --size 1440x3200 -b :duration=0.5  → glmark2 Score: 413
+glmark2-es2-gbm --off-screen --size 720x1600  -b :duration=0.3  → glmark2 Score: 949
+kmscube 渲染 10 秒期间 GPU 频率从 315MHz 升到 676MHz（devfreq 生效）
+```
+
+打通顺序上的两个关键点：
+1. **`88e7000.regulator`（QREFGEN）必须是可用模块**。它缺失时 DSI PHY 永久 deferred
+   （`/sys/kernel/debug/devices_deferred` 直接写着 `ae94000.dsi platform: supplier 88e7000.regulator not ready`），
+   msm 组件绑不齐，GPU 也就不会 probe。加载 `qcom-refgen-regulator.ko` 后一次成功。
+2. **DRM 必须编成模块（=m）而不是内建**。内建时 mdss probe 在 initcall 阶段卡死，
+   `/init` 根本没机会跑 → USB gadget 不出现 → 设备失联，只能靠按键进 fastboot。
+   改成 =m 后可以运行时 insmod，probe 出问题也只影响那一次加载。
+
+NixOS 侧配置（已进 nixos/configuration.nix）：
+```nix
+hardware.graphics = { enable = true; extraPackages = [ pkgs.mesa ]; };   # 生成 /run/opengl-driver（msm_dri.so + freedreno ICD）
+systemd.services.venus-display = { ... };   # 开机按序 modprobe: qcom-refgen-regulator → cec → drm_* → msm → panel
+```
+模块文件放在设备 `/root/ko/`（由 tools/make-bootimg.sh 编译产物里挑出，见 docs 里列出的 11 个 .ko）。
+
+面板现状：DSI 报告 `connected`、mode 1440x3200、crtc enable=1、backlight 设备存在（255/255），
+但**屏幕全黑、背光不亮** —— 面板上电/初始化（DSC PPS + on 序列）还没在真机上验证成功，待续。

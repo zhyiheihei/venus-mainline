@@ -107,11 +107,21 @@ in
       done
       sleep 1
 
-      # 2) 重新训练 PCIe 链路（ath11k 才会枚举到端点）
+      # 2) 重新训练 PCIe 链路（ath11k 才会枚举到端点）。
+      #    实测偶发 "Device not found"，所以失败时拨一次 wlan_en 再重训，最多 3 轮。
       D=/sys/bus/platform/drivers/qcom-pcie
-      echo 1c00000.pcie > "$D/unbind" 2>/dev/null || true
-      sleep 2
-      echo 1c00000.pcie > "$D/bind" 2>/dev/null || true
+      for t in 1 2 3; do
+        echo 1c00000.pcie > "$D/unbind" 2>/dev/null || true
+        sleep 2
+        echo 1c00000.pcie > "$D/bind" 2>/dev/null || true
+        sleep 6
+        [ -d /sys/class/net/wlan0 ] && break
+        echo "第 $t 轮链路没通, 拨 wlan_en 后重试"
+        echo disabled > "$P/regulator-wlan_en_ctl/state" 2>/dev/null || true
+        sleep 1
+        echo enabled > "$P/regulator-wlan_en_ctl/state" 2>/dev/null || true
+        sleep 2
+      done
 
       # 3) 等 ath11k 的网卡出现（名字可能是 wlan0 或 wlp1s0，取决于 udev 命名策略）
       IFACE=""
@@ -147,6 +157,32 @@ in
         sleep 1; i=$((i+1))
       done
       ${config.systemd.package}/bin/systemctl restart sshd.service 2>/dev/null || true
+    '';
+  };
+
+  # ---------- 图形（GPU/DRM）----------
+  # 让 mesa 的 freedreno（msm_dri.so）和 turnip（vulkan）通过 /run/opengl-driver 可用
+  hardware.graphics = {
+    enable = true;
+    extraPackages = [ pkgs.mesa ];
+  };
+
+  # 显示驱动在内核里是 =m（避免 probe 卡死时连 /init 都起不来），
+  # 这里按依赖顺序在开机时加载。
+  systemd.services.venus-display = {
+    description = "venus: 加载 DRM/显示模块（refgen → msm → panel）";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-udev-settle.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    script = ''
+      set -u
+      K=/root/ko
+      [ -d "$K" ] || exit 0
+      for m in qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus \
+               drm_exec drm_gpuvm gpu-sched mdt_loader ubwc_config msm \
+               panel-xiaomi-venus-k2; do
+        ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || insmod "$K/$m.ko" 2>/dev/null || true
+      done
     '';
   };
 

@@ -587,16 +587,57 @@ static int stmfts_read_system_info(struct stmfts_data *sdata)
  *   芯片 ID: fts_writeReadU8UX(0xFA, ADDR_SIZE_HW_REG, 0x20000000, buf, 2, 1)
  *   期望值: DCHIP_ID_0 = 0x36, DCHIP_ID_1 ∈ {0x48, 0x50, 0x40, 0x39}
  */
-static int venus_fts_read_id_once(struct stmfts_data *sdata)
+/*
+ * 按厂商 fts_lib（Evolution-X kernel_xiaomi_venus, fts_spi/fts_lib）复刻的最小存活检测：
+ *
+ *   1) 上电时序（fts_chip_powercycle）：复位保持有效（物理低）→ 开 vdd → 1ms → 开 avdd
+ *      → 5ms → 10ms → 释放复位（物理高）
+ *   2) 复位脉冲（fts_system_reset 走 GPIO 分支）：拉低 10ms，拉高
+ *   3) 读 FIFO 事件（pollForEvent）：命令 0x87 + 读 8 字节，SPI 下第一个字节是 dummy，
+ *      事件首字节 0x03 = EVT_ID_CONTROLLER_READY
+ *
+ * 我们的 reset-gpios 是 GPIO_ACTIVE_LOW，所以 gpiod_set_value(1) = 物理低 = 复位有效。
+ */
+#define FTS_EVT_CONTROLLER_READY	0x03
+#define FTS_FIFO_CMD_READONE		0x87
+#define FTS_FIFO_EVENT_SIZE		8
+
+static int venus_fts_read_event(struct stmfts_data *sdata, u8 *ev)
 {
 	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
 	struct spi_message msg;
-	u64 addr = 0x20000000ULL;
-	u8 cmd[5];
-	u8 rx[4] = { 0 };
-	int i, ret;
+	u8 cmd = FTS_FIFO_CMD_READONE;
+	u8 rx[FTS_FIFO_EVENT_SIZE + 1] = { 0 };
+	int ret;
 
-	cmd[0] = 0xfa;
+	spi_message_init(&msg);
+	xfer[0].tx_buf = &cmd;
+	xfer[0].len = 1;
+	spi_message_add_tail(&xfer[0], &msg);
+	xfer[1].rx_buf = rx;
+	xfer[1].len = sizeof(rx);
+	xfer[1].delay.value = 10;
+	xfer[1].delay.unit = SPI_DELAY_UNIT_USECS;
+	spi_message_add_tail(&xfer[1], &msg);
+
+	ret = spi_sync(sdata->spi, &msg);
+	if (ret < 0)
+		return ret;
+
+	memcpy(ev, rx + 1, FTS_FIFO_EVENT_SIZE);	/* SPI 下第 0 字节是 dummy */
+	return 0;
+}
+
+static void venus_fts_read_hw_chipid(struct stmfts_data *sdata)
+{
+	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
+	struct spi_message msg;
+	u64 addr = 0x20000000ULL;	/* ADDR_DCHIP_ID */
+	u8 cmd[5];
+	u8 rx[3] = { 0 };
+	int i;
+
+	cmd[0] = 0xfa;			/* FTS_CMD_HW_REG_R */
 	for (i = 0; i < 4; i++)
 		cmd[i + 1] = (u8)((addr >> ((3 - i) * 8)) & 0xff);
 
@@ -605,60 +646,58 @@ static int venus_fts_read_id_once(struct stmfts_data *sdata)
 	xfer[0].len = 5;
 	spi_message_add_tail(&xfer[0], &msg);
 	xfer[1].rx_buf = rx;
-	xfer[1].len = 3;
+	xfer[1].len = 3;		/* 2 字节 + dummy */
 	spi_message_add_tail(&xfer[1], &msg);
 
-	ret = spi_sync(sdata->spi, &msg);
-	dev_info(sdata->dev, "venus-fts: ID读 ret=%d -> [%*ph]%s\n", ret, 3, rx,
-		 rx[1] == 0x36 ? "  <<< 命中 0x36" : "");
-	return rx[1];
+	if (spi_sync(sdata->spi, &msg) == 0)
+		dev_info(sdata->dev,
+			 "venus-fts: 硬件 chip id 原始 [%*ph] → 0x%02x 0x%02x\n",
+			 3, rx, rx[1], rx[2]);
 }
 
-/*
- * 复位极性 / 上电顺序的不确定性：厂商 DT 里 reset-gpios 标志是 0x00（ACTIVE_HIGH），
- * 而机器上的引脚名是 TP_RESET_N（物理低有效）。这里把两种极性、两种上电顺序都试一遍，
- * 看芯片什么时候开始在 MISO 上应答。
- */
 static bool venus_fts_probe_chipid(struct stmfts_data *sdata)
 {
-	int pol, order;
-	bool found = false;
+	u8 ev[FTS_FIFO_EVENT_SIZE];
+	int i;
 
-	for (pol = 0; pol < 2; pol++) {
-		for (order = 0; order < 2; order++) {
-			/* 按住复位 */
-			gpiod_set_value_cansleep(sdata->reset_gpio, !pol ? 1 : 0);
-			msleep(20);
+	/* 1) 上电时序 */
+	gpiod_set_value_cansleep(sdata->reset_gpio, 1);	/* 复位有效（物理低） */
+	regulator_disable(sdata->supplies[0].consumer);
+	regulator_disable(sdata->supplies[1].consumer);
+	msleep(20);
+	regulator_enable(sdata->supplies[0].consumer);	/* vdd */
+	msleep(2);
+	regulator_enable(sdata->supplies[1].consumer);	/* avdd */
+	msleep(6);
+	msleep(10);
+	gpiod_set_value_cansleep(sdata->reset_gpio, 0);	/* 释放复位（物理高） */
+	msleep(10);
 
-			/* 上电（保持按住复位） */
-			if (order == 0) {
-				regulator_enable(sdata->supplies[0].consumer);
-				msleep(2);
-				regulator_enable(sdata->supplies[1].consumer);
-				msleep(6);
-			}
+	/* 2) 复位脉冲 */
+	gpiod_set_value_cansleep(sdata->reset_gpio, 1);
+	msleep(12);
+	gpiod_set_value_cansleep(sdata->reset_gpio, 0);
+	msleep(5);
 
-			/* 释放复位 */
-			gpiod_set_value_cansleep(sdata->reset_gpio, !pol ? 0 : 1);
-			msleep(60);
-
-			if (order == 1) {
-				regulator_enable(sdata->supplies[0].consumer);
-				msleep(2);
-				regulator_enable(sdata->supplies[1].consumer);
-				msleep(20);
-			}
-
-			if (venus_fts_read_id_once(sdata) == 0x36) {
-				found = true;
-				dev_info(sdata->dev,
-					 "venus-fts: 复位极性=%d 上电顺序=%d 命中\n",
-					 pol, order);
-			}
+	/* 3) 轮询 controller-ready 事件 */
+	for (i = 0; i < 200; i++) {
+		if (venus_fts_read_event(sdata, ev) < 0)
+			break;
+		if (ev[0] && ev[0] != 0xff) {
+			dev_info(sdata->dev,
+				 "venus-fts: 第 %d 次读到事件 [%*ph]%s\n", i,
+				 FTS_FIFO_EVENT_SIZE, ev,
+				 ev[0] == FTS_EVT_CONTROLLER_READY ? "  <<< 芯片就绪" : "");
 		}
+		if (ev[0] == FTS_EVT_CONTROLLER_READY) {
+			venus_fts_read_hw_chipid(sdata);
+			return true;
+		}
+		msleep(10);
 	}
 
-	return found;
+	dev_info(sdata->dev, "venus-fts: 200 次轮询没有 controller-ready\n");
+	return false;
 }
 
 static void stmfts_reset(struct stmfts_data *sdata)

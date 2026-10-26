@@ -1045,3 +1045,37 @@ curl https://cache.nixos.org/nix-cache-info → 200（外网通）
 **注意**：`venus-wifi-power` 不要在运行时随手 `restart`。它会先 unbind PCIe，
 中途失败就把无线留在半残状态（ath11k global reset 死态），只有重启能救。
 改动要么写进配置等下次开机，要么接受"失败就重启"。
+
+### 触屏突破：芯片活了（2026-10-26 夜）
+
+之前所有探测（单字节命令、HW 寄存器读、SPI mode 0-3 × 7M/1M 全扫）都返回全 0，
+是因为**上电/复位时序错了**，不是 SPI 参数问题。按厂商 `fts_lib` 复刻时序后，
+芯片立刻应答：
+
+```
+venus-fts: 第 0 次读到事件 [03 00 00 00 00 00 00 00]  <<< 芯片就绪
+```
+
+`0x03` = `EVT_ID_CONTROLLER_READY`（ftsSoftware.h:274），即厂商代码里
+`fts_system_reset()` 之后 `pollForEvent()` 等的那个事件。**这是芯片确实在工作的确证。**
+
+关键点（三条，缺一不可）：
+
+1. **上电时复位必须保持有效**（`fts_chip_powercycle`）：复位拉低 → 开 vdd → 1ms →
+   开 avdd → 5ms → 10ms → 释放复位。我们之前是"先释放再上电"，芯片没进复位态。
+2. **复位是物理低有效**（引脚名 `TP_RESET_N`）。我们的 `reset-gpios` 用 ACTIVE_LOW，
+   所以 `gpiod_set_value(1)` = 物理低 = 复位有效；`0` = 释放。
+   注意厂商 DT 里写的是 `<&tlmm 22 0x00>`（ACTIVE_HIGH），但驱动里 `gpio_set_value(reset, 0)`
+   对应物理低 —— 两边语义一致，别照抄 DT 标志。
+3. **FIFO 事件读取**：命令 `0x87`（`FIFO_CMD_READONE`，SPI 版）+ 读 8 字节，
+   **SPI 下第 0 字节是 dummy**，要丢掉；事件首字节才是 id。
+
+另外两个环境前提：`spi-geni-qcom` 模块必须先加载（否则 `/sys/bus/spi/devices/` 里连 spi1.0 都没有，
+驱动 probe 根本不会被调用，会误判成"芯片不应答"）。
+
+**仍未解决**：`FTS_CMD_HW_REG_R(0xFA) + ADDR_DCHIP_ID(0x20000000)` 读回仍是 `0x0000`。
+但厂商代码里这条只在"复位失败"时做诊断用，正常路径是 `fts_system_reset()` 成功后
+用 `readSysInfo()` 从 ST 专有协议读系统信息，所以不是阻塞项。
+
+下一步：照厂商 `fts_init()` 走 —— `fts_system_reset()`（GPIO 分支）→ `readSysInfo()` →
+`fts_init_sensing()`（`setScanMode(SCAN_MODE_ACTIVE)` 开扫描）→ 打开中断并解析 8 字节 MT 事件。

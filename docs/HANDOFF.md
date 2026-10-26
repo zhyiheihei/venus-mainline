@@ -22,8 +22,13 @@ turnip+freedreno，glmark2 413@1440x3200）/ **面板显示（含刷新）** / �
 `drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c`）。**部署时必须核对 build-id**，
 别把旧模块当成新的（我差点误判）。
 
-**仍未通**：触屏（`fts-spi-venus` 驱动在仓库里，但 DTB 里没有 `spi11/touchscreen@0` 节点，
-所以没绑定；且芯片读回全 0，上电时序待查）。充电/电池仍无主线驱动。
+**触屏已通（2026-10-26 深夜）**：`kernel/venus/fts-spi-venus.c` + DTS 的 `spi11/touchscreen@0`
++ `ts_avdd`（GPIO132）。开机由 `venus-touch.service` 依次加载 `spi-geni-qcom` 与 `fts-spi-venus`。
+关键点：厂商 Sense ON 是 `setScanMode(ACTIVE, 0x01)`（0x00 不产事件）；上电时复位必须保持有效；
+SPI 下读事件第 0 字节是 dummy；事件格式 `id=(e1&0xF0)>>4, x=((e3&0x0F)<<8)|e2, y=(e4<<4)|((e3&0xF0)>>4)`。
+响应优化：一次事务读回整条 FIFO（256B）再解析。详见 docs/porting-notes.md。
+
+**仍未通**：充电/电池（上游无驱动）。蓝牙（hci0 注册但不回 HCI 命令，留档待续）。
 
 **操作纪律（血泪，照做）**：
 - 重启只用 `echo b > /proc/sysrq-trigger`（`systemctl reboot` 在这台机器上不生效）。

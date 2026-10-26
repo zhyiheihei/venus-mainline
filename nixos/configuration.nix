@@ -251,7 +251,7 @@ in
       sleep 5
       for m in qcom-pon qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus \
                drm_exec drm_gpuvm gpu-sched mdt_loader ubwc_config msm \
-               panel-xiaomi-venus-k2; do
+               panel-xiaomi-venus-k2 spi-geni-qcom fts-spi-venus; do
         ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || ${pkgs.kmod}/bin/insmod "$K/$m.ko" 2>/dev/null || true
       done
     '';

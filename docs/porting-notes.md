@@ -960,3 +960,38 @@ v110（触屏节点）一次性加了 `&spi11` 的 pinctrl 覆盖 + `ts_avdd` �
 教训：设备树改动必须**一次只加一个节点**；L3C 是共享 PMIC 轨，强制改电压风险最高。
 另外发现生成的 DTS 本来就带 `&spi11 { status = "okay" }`（来自 star 参考），
 所以 spi11 控制器此前一直是开着的，卡死不是它本身。
+
+### 触屏进展与真正卡点（2026-10-26 晚）
+
+**已排除硬件链路问题**（都有设备端输出为证）：
+
+- 引脚复用正确：Android 运行时 DTB 里 `spi@a8c000` 的 pinctrl 指向 `qupv3_se11_spi_active`，
+  pins = `gpio48..51`、`function = "qup11"`，与我们 DTS 里的 `qup_spi11_default` 完全一致。
+- 供电已开：`regulator_summary` 显示 `vreg_l2c_1p8`（1800mV，vdd）、
+  `vreg_l3c_3p0`（3008mV）、`ts_avdd`（3300mV，GPIO132 开关）全部 `enabled=1`。
+- 驱动绑定成功，`/dev/input/event3` 已创建；`venus-fts: vdd enable rc=0 / avdd enable rc=0`、
+  `supply[0] vdd enabled=1 / supply[1] avdd enabled=1`。
+- CS 处理正确：命令与数据在同一个 `spi_message` 内（不会中途抬 CS）。
+
+**真正卡点：我们这套驱动的 SPI 命令帧格式是错的。**
+从厂商驱动（Evolution-X-Devices/kernel_xiaomi_venus，
+`drivers/input/touchscreen/fts_spi/fts_lib/ftsIO.c`）读到的真实协议：
+
+- 写：`fts_write(cmd, cmdLength)` —— **命令是 3~6 字节的帧**，
+  例如 `{0xa0, 0x03, 0x00}`、`{0xfa, 0x20, 0x00, 0x00, 0x29, 0x02}`、`{0xC0, 0x00, 0x00, 0xF9}`。
+- 读：`fts_write_read(cmd, cmdLen, out, outLen)` —— 同一个 spi_message 内两个 transfer：
+  先写 cmdLength 字节命令，再读 byteToRead 字节数据；
+  **读的第一字节没有"回显占位"**（`transfer[0].rx_buf = NULL`），
+  所以我们驱动里"多读 1 字节丢掉"的假设也是错的，真实数据会被整体错位。
+
+结论：芯片不是没上电，是听不懂我们发的单字节命令，所以全部回 0
+（`chip_id=0x0000`，而且 `[a8 00 00 00 …]` 的首字节是 MOSI 回读，不是芯片应答）。
+
+下一步是移植厂商 `fts_lib`（ftsIO/ftsCore/ftsTest/ftsFlash）或至少把命令帧格式与初始化序列照抄过来，
+属于驱动移植工作量，不再是设备树/配置问题。
+
+### 本轮设备树改动（v112 / v113，均已刷入且系统正常）
+
+- v112：只加 `touchscreen@0` 子节点（`vdd = L2C`、`avdd = L3C`）→ 系统正常，驱动绑定，读回全 0
+- v113：再加 `ts_avdd`（GPIO132 负载开关，`vin = L3C`），**不动 L3C 电压**→ 系统正常，读回仍全 0
+- 两次都没有出现 v110 那种"整机卡死"，说明 v110 的挂机是 `&vreg_l3c_3p0` 强制 3.3V 那一项（而不是触摸节点本身）

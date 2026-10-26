@@ -910,12 +910,43 @@
 	};
 };
 
+/*
+ * 触摸 AVDD 开关：厂商把 PM8350C L3C 的 3.3V 经 GPIO132 负载开关送给触摸控制器。
+ * 缺这一步芯片不上电（表现为 SPI 读回全 0、chip_id=0x0000）。
+ */
+/ {
+	ts_avdd: regulator-ts-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ts_avdd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vreg_l3c_3p0>;
+		gpio = <&tlmm 132 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <4000>;
+	};
+};
+
 &spi11 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&qup_spi11_default>;
 	status = "okay";
 
-	/* STM FTS touchscreen */
+	/*
+	 * STM FTS 触摸（SE11）。本步只加这一个子节点：两路电都直接引用 PMIC LDO
+	 * （vdd = L2C 1.8V，avdd = L3C 3.0~3.3V），不引入 GPIO132 负载开关、
+	 * 也不改 L3C 的电压上限 —— 上一次把这三样一起加进来直接挂机了。
+	 */
+	touchscreen@0 {
+		compatible = "st,venus-fts";
+		reg = <0>;
+		spi-max-frequency = <7000000>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <23 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&tlmm 22 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&vreg_l2c_1p8>;
+		avdd-supply = <&ts_avdd>;
+	};
 };
 
 &tlmm {

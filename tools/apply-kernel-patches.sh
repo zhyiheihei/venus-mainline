@@ -11,6 +11,22 @@ ksrc=${KSRC:-$HOME/.cache/venus-kernel/linux-7.2.6}
 
 [ -d "$ksrc" ] || { echo "找不到内核源码树: $ksrc" >&2; exit 1; }
 
+# 0) venus 触摸驱动（ST FTS over 3-wire SPI，由 stmfts 移植）
+cp "$root/kernel/venus/fts-spi-venus.c" "$ksrc/drivers/input/touchscreen/"
+KC="$ksrc/drivers/input/touchscreen/Kconfig"
+KM="$ksrc/drivers/input/touchscreen/Makefile"
+grep -q 'TOUCHSCREEN_VENUS_FTS' "$KC" || cat >> "$KC" <<'EOF'
+
+config TOUCHSCREEN_VENUS_FTS
+	tristate "venus (Mi 11) ST FTS touchscreen over SPI"
+	depends on SPI
+	help
+	  STMicroelectronics FingerTipS touchscreen controller used on the
+	  Xiaomi Mi 11 (venus), wired over 3-wire SPI. Ported from stmfts.
+EOF
+grep -q 'fts-spi-venus.o' "$KM" || echo 'obj-$(CONFIG_TOUCHSCREEN_VENUS_FTS) += fts-spi-venus.o' >> "$KM"
+echo "touch driver 已加入 Kconfig/Makefile"
+
 # 1) venus 面板驱动
 cp "$root/kernel/venus/panel-xiaomi-venus-k2.c" "$ksrc/drivers/gpu/drm/panel/"
 python3 - "$ksrc/drivers/gpu/drm/panel/Kconfig" "$ksrc/drivers/gpu/drm/panel/Makefile" <<'PY'

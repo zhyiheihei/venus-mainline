@@ -282,6 +282,18 @@ def convert(stage):
     s = s.rstrip() + """
 
 /* ---- 显示: mdss / dsi0 / dsi0_phy / 面板 ---- */
+/* 面板 1.2V 逻辑电源：厂商 DTS 里由 GPIO83 使能（display_panel_vddd） */
+/ {
+	display_panel_vddd: regulator-vddd-1p2 {
+		compatible = "regulator-fixed";
+		regulator-name = "vddd_1p2";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		gpio = <&tlmm 83 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+	};
+};
 &mdss {
 	status = "okay";
 };
@@ -299,8 +311,12 @@ def convert(stage):
 &mdss_dsi0_out {
 	remote-endpoint = <&venus_panel_in>;
 	data-lanes = <0 1 2 3>;
-	/* 命令模式面板由 MDP 的 vsync 当 TE（上游 sdm845 机型同样做法） */
-	qcom,te-source = "mdp_vsync_e";
+	/*
+	 * 命令模式的帧提交需要 vsync 源。mdp_vsync_e 是外部 TE 引脚（这块板子没接），
+	 * 于是永远等不到 TE → 只有 modeset 那一帧能下发，屏幕表现为"纯色、不刷新"。
+	 * 改用 DSI 控制器内部的 intf TE（mdp_intf0），由我们自己的时序产生 vsync。
+	 */
+	qcom,te-source = "mdp_intf0";
 };
 
 &mdss_dsi0 {
@@ -312,12 +328,68 @@ def convert(stage):
 
 		vddio-supply = <&vreg_l12c_1p8>;
 		vdd-supply = <&vreg_l13c_3p0>;
+		vddd-supply = <&display_panel_vddd>;
 
 		port {
 			venus_panel_in: endpoint {
 				remote-endpoint = <&mdss_dsi0_out>;
 			};
 		};
+	};
+};
+"""
+
+    # 触摸：ST FTS 挂在 qupv3 SE11 (spi@a8c000)，3-wire SPI，pins gpio48-51，
+    # IRQ gpio23，reset gpio22，avdd 由 tlmm132 控制的 fixed regulator 供电，vdd = pm8350c L2。
+    s = s.rstrip() + """
+
+/* ---- 触摸: ST FTS on spi11 (qupv3 SE11) ---- */
+/ {
+	/*
+	 * 触摸 AVDD：厂商用的是 PM8350C L3（3.3V）+ GPIO132 负载开关，
+	 * 所以这里把 ts_avdd 做成「受 L3 供电的开关」——使能它时内核会连带把
+	 * L3 打开，缺了这一步触摸控制器根本不上电（表现为读寄存器全 0、
+	 * INT 一直被拉住导致中断风暴）。
+	 */
+	ts_avdd: regulator-ts-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "ts_avdd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vreg_l3c_3p0>;
+		gpio = <&tlmm 132 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <4000>;
+	};
+};
+
+&tlmm {
+	venus_ts_spi_pins: venus-ts-spi-pins {
+		pins = "gpio48", "gpio49", "gpio50", "gpio51";
+		function = "qup11";
+		drive-strength = <6>;
+		bias-disable;
+	};
+};
+
+&spi11 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&venus_ts_spi_pins>;
+
+	touchscreen@0 {
+		compatible = "st,venus-fts";
+		reg = <0>;
+		spi-max-frequency = <7000000>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <23 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&tlmm 22 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&vreg_l2c_1p8>;
+		avdd-supply = <&ts_avdd>;
+		touchscreen-size-x = <1440>;
+		touchscreen-size-y = <3200>;
+		touchscreen-inverted-x;
+		touchscreen-swapped-x-y;
 	};
 };
 """
@@ -359,6 +431,15 @@ def convert(stage):
         off = off + ['ufs_mem_hc', 'ufs_mem_phy', 'usb_1', 'usb_1_dwc3', 'usb_1_hsphy', 'usb_1_qmpphy']
     s = s.rstrip() + '\n\n/* ---- 阶段%d: 只保留 UFS/USB2/稳压器/tlmm/串口/屏幕日志, 其余逐步再开 ---- */\n' % stage
     s += ''.join(f'&{n} {{ status = "disabled"; }};\n' for n in off)
+    # 触摸 AVDD 源：PM8350C L3，厂商给 3.3V
+    s = s.rstrip() + """
+
+&vreg_l3c_3p0 {
+\tregulator-min-microvolt = <3300000>;
+\tregulator-max-microvolt = <3300000>;
+};
+"""
+
     return s
 
 
@@ -378,3 +459,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

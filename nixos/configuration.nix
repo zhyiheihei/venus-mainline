@@ -26,7 +26,7 @@ in
   boot.loader.generic-extlinux-compatible.enable = false;
   # 固件由内核从 /run/current-system/firmware 读取（NixOS 里固件是 .zst 压缩的，
   # 而我们的内核没开 FW_LOADER_COMPRESS，所以 venus-firmware 服务会先解压到 /var/lib/venus-fw）
-  boot.kernelParams = [ "console=ttyGS0,115200" ];
+  boot.kernelParams = [ "console=ttyGS0,115200" "consoleblank=0" ];
 
   # ---------- 网络 ----------
   networking.hostName = "venus";
@@ -85,7 +85,8 @@ in
     wantedBy = [ "getty.target" ];
     serviceConfig = { Restart = "always"; RestartSec = 1; };
   };
-  services.getty.autologinUser = "root";
+  # tty1 自动登录普通用户并直接进 sway（sway 不接受 root）
+  services.getty.autologinUser = "venus";
 
   # ---------- venus 专有：WiFi 上电 + PCIe 重训 + 网络 ----------
   systemd.services.venus-wifi-power = {
@@ -160,6 +161,103 @@ in
     '';
   };
 
+  # ---------- 桌面环境（Sway，可直接从 SSH 驱动，便于取色/截图验证）----------
+  # 选 sway 而不是 GNOME 的理由：它不需要登录管理器、RAM 占用小，
+  # 而且可以通过 swaymsg（SSH）和 grim（截图）完全脚本化控制 —— 手机上
+  # 还没通触屏时，这是唯一能"用"起来的桌面，也是核对颜色的客观手段。
+  programs.sway = {
+    enable = true;
+    wrapperFeatures.gtk = true;
+  };
+
+  # 给桌面用的普通用户（sway 不接受 root），tty1 自动登录直接进 sway
+  users.users.venus = {
+    isNormalUser = true;
+    uid = 1000;
+    extraGroups = [ "wheel" "video" "render" "input" "audio" ];
+    initialPassword = "venus";
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAXn2roZsbvURS+faytLLz2OE1gemC19RMNsPj3Ypnha 2386656187@qq.com"
+    ];
+  };
+  security.sudo.wheelNeedsPassword = false;
+
+
+  # 电源键：交给桌面处理（没有真正 suspend 支持，别让 logind 直接关机）
+  services.logind.extraConfig = ''
+    HandlePowerKey=ignore
+    HandlePowerKeyLongPress=ignore
+    HandleLidSwitch=ignore
+  '';
+
+  # 关屏/亮屏：只改背光亮度（DCS 0x51），不动 CRTC，避免 DPMS 恢复不了
+  environment.etc."venus-bl-toggle.sh".text = ''
+    #!/bin/sh
+    BL=/sys/class/backlight/ae94000.dsi.0
+    S=/run/venus-bl-saved
+    case "$1" in
+      off) cat $BL/brightness > $S 2>/dev/null; echo 0 > $BL/brightness ;;
+      on)  [ -s $S ] && cat $S > $BL/brightness || echo 153 > $BL/brightness ;;
+      *)   cur=$(cat $BL/brightness); if [ "$cur" = "0" ]; then
+             [ -s $S ] && cat $S > $BL/brightness || echo 153 > $BL/brightness
+           else
+             echo $cur > $S; echo 0 > $BL/brightness
+           fi ;;
+    esac
+  '';
+  environment.etc."venus-bl-toggle.sh".mode = "0755";
+
+  # 开机把亮度恢复到 60%（systemd-backlight 会用旧值覆盖，这里排在它之后）
+  systemd.services.venus-brightness = {
+    description = "venus: 开机设置面板亮度 60%";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-backlight@backlight:ae94000.dsi.0.service" "venus-display.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    script = ''
+      B=/sys/class/backlight/ae94000.dsi.0/brightness
+      [ -e "$B" ] || exit 0
+      echo 153 > "$B" 2>/dev/null || true
+    '';
+  };
+
+  # sway 配置：空闲关屏 + 电源键唤醒/切换
+  environment.etc."sway/config".text = ''
+    set $mod Mod4
+    font pango:DejaVu Sans Mono 10
+    default_border pixel 2
+
+    # 背景
+    output * bg #102030 solid_color
+    output DSI-1 bg #102030 solid_color
+
+    # 终端与启动器
+    bindsym $mod+Return exec foot
+    bindsym $mod+d exec fuzzel
+    bindsym $mod+Shift+q kill
+
+    # 电源键：按一下关屏、再按一下亮屏（只动背光）
+    bindsym --locked XF86PowerOff exec /etc/venus-bl-toggle.sh
+    bindsym --locked XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
+    bindsym --locked XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+
+    # 空闲 2 分钟关屏，任何输入立即恢复
+    # 空闲 3 分钟关背光，任何输入立即恢复
+    exec swayidle -w \
+      timeout 180 '/etc/venus-bl-toggle.sh off' \
+      resume '/etc/venus-bl-toggle.sh on'
+
+    include /etc/sway/config.d/*
+  '';
+
+  environment.loginShellInit = ''
+    if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+      exec sway
+    fi
+  '';
+
+  # 取色/截图/控制工具
+
+
   # ---------- 图形（GPU/DRM）----------
   # 让 mesa 的 freedreno（msm_dri.so）和 turnip（vulkan）通过 /run/opengl-driver 可用
   hardware.graphics = {
@@ -172,16 +270,18 @@ in
   systemd.services.venus-display = {
     description = "venus: 加载 DRM/显示模块（refgen → msm → panel）";
     wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-udev-settle.service" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    after = [ "multi-user.target" "systemd-udev-settle.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 120; };
     script = ''
       set -u
       K=/root/ko
       [ -d "$K" ] || exit 0
-      for m in qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus \
+      # 显示初始化必须在系统起来之后做：早期做会和 PMIC/clock 抢时序导致卡死
+      sleep 5
+      for m in qcom-pon qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus \
                drm_exec drm_gpuvm gpu-sched mdt_loader ubwc_config msm \
-               panel-xiaomi-venus-k2; do
-        ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || insmod "$K/$m.ko" 2>/dev/null || true
+               panel-xiaomi-venus-k2 spi-geni-qcom fts-spi-venus; do
+        ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || ${pkgs.kmod}/bin/insmod "$K/$m.ko" 2>/dev/null || true
       done
     '';
   };
@@ -192,6 +292,8 @@ in
   hardware.firmware = [ venusFirmware ];
   environment.systemPackages = with pkgs; [
     vim git htop tmux rsync curl wget iw wpa_supplicant usbutils pciutils busybox e2fsprogs zstd
+    # 桌面/取色/截图
+    grim slurp swaybg wlr-randr foot fuzzel mako imagemagick swayidle brightnessctl
   ];
   services.udev.packages = [ pkgs.usbutils ];
   nix.settings.experimental-features = [ "nix-command" "flakes" ];

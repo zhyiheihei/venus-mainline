@@ -238,7 +238,7 @@ in
   systemd.services.venus-brightness = {
     description = "venus: 开机设置面板亮度";
     wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-backlight@backlight:ae94000.dsi.0.service" "venus-drm.service" ];
+    after = [ "systemd-backlight@backlight:ae94000.dsi.0.service" ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       B=/sys/class/backlight/ae94000.dsi.0/brightness
@@ -247,6 +247,22 @@ in
     '';
   };
 
+
+
+  # ---------- 日志：持久化 + 限额（标准 systemd 行为）----------
+  services.journald.extraConfig = ''
+    Storage=persistent
+    SystemMaxUse=256M
+    SystemMaxFileSize=32M
+  '';
+
+  # ---------- HiDPI ----------
+  # 缩放只由 Plasma 自己管（kscreen-doctor 已经写入用户的 kwinoutputconfig.json：
+  # scale=2、transform=Rotated90）。不要在环境变量里再叠一层 GDK_SCALE/QT_SCALE_FACTOR，
+  # 否则 Wayland 应用会被二次放大（实测 200% + 200% = 400%）。
+  environment.sessionVariables = {
+    XCURSOR_SIZE = "32";
+  };
 
   # ---------- 关闭 KDE 屏幕锁定 ----------
   # 没有键盘/触屏解锁手段，一旦锁屏就只能靠重启；且 AMOLED 上黑屏会和"死机"混淆。
@@ -257,23 +273,43 @@ in
     Timeout=0
   '';
 
-  # ---------- 触屏启动服务 ----------
-  # spi-geni-qcom 必须先加载（否则 /sys/bus/spi/devices 里没有 spi1.0，触屏驱动不会被 probe），
-  # 再加载 fts-spi-venus（模块文件由 /root/ko 提供）。
-  systemd.services.venus-touch = {
-    description = "venus: 加载 SPI 与触屏驱动";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "venus-drm.service" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 60; };
-    script = ''
-      set -u
-      K=/root/ko
-      [ -d "$K" ] || exit 0
-      ${pkgs.kmod}/bin/insmod "$K/spi-geni-qcom.ko" 2>/dev/null || true
-      sleep 2
-      ${pkgs.kmod}/bin/insmod "$K/fts-spi-venus.ko" 2>/dev/null || true
-    '';
-  };
+  # ---------- 标准内核布局：自建内核 + 模块交给 NixOS ----------
+  # 这样 /lib/modules/7.2.6 存在、modprobe 可用，initrd 也能用 kernelModules 早期加载显示模块。
+  # NixOS 要求 modulesTree 里只有一个内核版本；我们的模块是 7.2.6，
+  # 所以把 kernelPackages.kernel 指向这个包（带 modDirVersion/features 等元数据）。
+  boot.kernelPackages = lib.mkForce (let
+    kernel = (pkgs.callPackage ./kmods-package.nix { }).overrideAttrs (old: {
+      passthru = (old.passthru or { }) // {
+        modDirVersion = "7.2.6";
+        version = "7.2.6";
+        features = { };
+      };
+    });
+    base = {
+      inherit kernel;
+      kernelAtLeast = v: lib.versionAtLeast "7.2.6" v;
+      kernelOlder = v: lib.versionOlder "7.2.6" v;
+      stdenv = pkgs.stdenv;
+    };
+  in base // {
+    # NixOS 会对 kernelPackages 调 extend()，这里保持可扩展
+    extend = f: base // f base base;
+  });
+
+  # 早期 KMS：stage-1 就点亮面板，之后 stage-1/stage-2 的日志都能显示在屏幕上
+  # 我们的内核把 UFS/ext4 等都编成内建，不需要 initrd 里的块设备模块；
+  # 但 NixOS 默认会要求 ext2 模块，这里显式限定成我们自己的模块集。
+  boot.initrd.availableKernelModules = lib.mkForce [ ];
+  boot.initrd.kernelModules = [
+    "qcom-refgen-regulator" "cec" "drm_display_helper" "drm_dp_aux_bus"
+    "drm_exec" "drm_gpuvm" "gpu-sched" "mdt_loader" "ubwc_config"
+    "msm" "panel-xiaomi-venus-k2"
+  ];
+
+  # ---------- 显示模块尽早加载 ----------
+  # 目标：让面板在 stage-2 一开始就点亮，屏幕上就能刷内核/服务日志。
+  # 注意：模块进 initrd（真正从第 1 秒起就有日志）需要把自建内核连同模块
+  # 一起打成 Nix 包，属于后续工作；目前先做到 stage-2 早启。
 
   # ---------- 图形（GPU/DRM）----------
   # 让 mesa 的 freedreno（msm_dri.so）和 turnip（vulkan）通过 /run/opengl-driver 可用
@@ -284,27 +320,6 @@ in
 
   # 显示驱动在内核里是 =m（避免 probe 卡死时连 /init 都起不来），
   # 这里按依赖顺序在开机时加载。
-  systemd.services.venus-drm = {
-    description = "venus: 加载 DRM/显示模块（refgen → msm → panel）";
-    wantedBy = [ "multi-user.target" ];
-    # 必须早于桌面：Plasma 启动时 DRM 设备得已经存在
-    before = [ "greetd.service" "display-manager.service" ];
-    after = [ "systemd-udev-settle.service" "venus-wifi-power.service" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 120; };
-    script = ''
-      set -u
-      K=/root/ko
-      [ -d "$K" ] || exit 0
-      # 显示初始化必须在系统起来之后做：早期做会和 PMIC/clock 抢时序导致卡死
-      sleep 5
-      for m in qcom-pon qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus \
-               drm_exec drm_gpuvm gpu-sched mdt_loader ubwc_config msm \
-               panel-xiaomi-venus-k2; do
-        ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || ${pkgs.kmod}/bin/insmod "$K/$m.ko" 2>/dev/null || true
-      done
-    '';
-  };
-
   # ---------- 杂项 ----------
   time.timeZone = "Asia/Shanghai";
   i18n.defaultLocale = "en_US.UTF-8";

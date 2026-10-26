@@ -1136,3 +1136,47 @@ minor= ((e[7] & 0xC0) >> 2) | (e[6] & 0x0F)
 - DTS：`sm8350-xiaomi-venus.dts` 的 `&spi11 { touchscreen@0 }` + `ts_avdd`（GPIO132 负载开关）
 - NixOS：`systemd.services.venus-touch`（insmod spi-geni-qcom → fts-spi-venus）、
   `/etc/xdg/kscreenlockerrc`（Autolock=false，避免无键盘时锁死）
+
+## 2026-10-26 深夜（二）· 走向"标准 Linux"：早期 KMS + 标准模块布局
+
+目标（用户要求）：像普通 Linux 机器一样 —— 上电就开始刷内核日志，刷完进桌面；
+不要一堆自己发明的服务、不要 `/root/ko` 里手工 insmod。
+
+### 落地的四件事
+
+1. **自建内核的模块进入 NixOS 标准体系**
+   `nixos/kmods-package.nix` + `tools/pack-kernel.sh`：把 `Image` 与 **605 个模块**
+   按 `lib/modules/7.2.6/{kernel,extra}/…` 打包，`depmod` 生成 `modules.dep`；
+   通过 `boot.kernelPackages.kernel`（带 `modDirVersion/features/kernelAtLeast` 等元数据）
+   交给 NixOS。效果：`/lib/modules/7.2.6` 完整、`modinfo msm` / `modprobe msm` 都能用。
+   ⚠️ 一个坑：内核树里会残留"已改成内建"的旧 `.ko`（例如 `backlight.ko`），
+   `depmod` 会把它收进去，`modprobe` 命中后报
+   `exports duplicate symbol backlight_device_get_by_name (owned by kernel)` /
+   `Invalid module format`。**只按 `modules.order` 收模块**（本次 614 → 605）。
+
+2. **早期 KMS：面板在 2 秒点亮**
+   `boot.initrd.kernelModules` 带上显示链路 11 个模块，并在 initrd 的 `preinit`
+   里先 `modprobe` 一遍（不依赖 stage-1 的时序）。实测：
+
+   ```
+   [ 2.206646] venus-k2: on 序列 rc=0
+   [ 2.246305] Console: switching to colour frame buffer device 90x100
+   ```
+
+   也就是说从第 2 秒起 fbcon 就在工作，屏幕上开始刷日志（典型 Linux 观感）。
+
+3. **控制台字体翻倍**：`CONFIG_FONTS=y` + `CONFIG_FONT_TER16x32=y`，
+   1440×3200 上从 180×200 字符变成 **90×100**（字大一倍）。
+
+4. **udev 自动加载取代自写服务**：删掉 `venus-drm` / `venus-touch` 两个 insmod 服务。
+   现在 `spi-geni-qcom`、`fts-spi-venus`、`qcom-pon` 等都由 udev 按 modalias 自动加载
+   （`/dev/input` 有 event0..3：gpio-keys、venus-fts-ts、pmic_pwrkey、pmic_resin）。
+
+### 仍然不是"标准"的地方（下一步）
+
+- stage-1 在挂载根之后、加载模块之前有 **约 30 秒空档**（3.2s → 32.9s 才出现
+  `loading module msm`），早期 KMS 现在靠 preinit 抢在它前面。这段空白要单独查。
+- 内核 0.3s 的 `Console: switching ... 90x100` 来自 DTS 里的 `simple-framebuffer`
+  （ABL 的 splash 帧缓冲）；msm 在 2.2s 接管后 fbcon 重新绑定，这中间有一次切换。
+- 圆角盲区：fbcon 无内容边距（`fb_var_screeninfo` 的 margin 是消隐时序）。
+  真要留白得给控制台用略小的模式，属于后续。

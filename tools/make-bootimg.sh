@@ -28,7 +28,7 @@ cp "$root/kernel/venus/sm8350-xiaomi-venus.dts" \
 # 2) NixOS initrd（带缓存）
 if [ "${REFRESH:-0}" = "1" ] || [ ! -s "$cache" ]; then
   echo "== 从设备取 NixOS initrd =="
-  ssh venus "cp /run/current-system/initrd /tmp/nixos-initrd.bin"
+  ssh venus "cp \$(readlink -f /nix/var/nix/profiles/system/initrd) /tmp/nixos-initrd.bin"
   "$here/vpull.sh" /tmp/nixos-initrd.bin "$work" >/dev/null
   mv -f "$work/nixos-initrd.bin" "$cache"
 fi
@@ -55,6 +55,13 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mkdir -p /sys/kernel/config /dev/pts
 mount -t configfs none /sys/kernel/config 2>/dev/null
 mount -t devpts devpts /dev/pts 2>/dev/null
+
+# 早期 KMS：模块已随 initrd 一起进来（/lib/modules/7.2.6），这里直接加载，
+# 让面板在几秒内点亮、fbcon 接管，屏幕上随即开始刷内核日志。
+for m in qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus drm_exec \
+         drm_gpuvm gpu-sched mdt_loader ubwc_config msm panel-xiaomi-venus-k2; do
+  modprobe "\$m" 2>/dev/null || true
+done
 
 UDC=\$(ls /sys/class/udc 2>/dev/null | head -1)
 if [ -n "\$UDC" ]; then
@@ -101,7 +108,7 @@ gzip -9 -c "$build/arch/arm64/boot/Image" > "$work/Image.gz"
 cat "$work/Image.gz" "$build/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb" > "$work/Image.gz-dtb"
 
 cmdline="console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init boot.shell_on_fail \
-net.ifnames=0 ignore_loglevel loglevel=4 firmware_class.path=/run/current-system/firmware \
+net.ifnames=0 loglevel=7 firmware_class.path=/run/current-system/firmware \
 regulator_ignore_unused pd_ignore_unused clk_ignore_unused $extra"
 
 PYTHONPATH=$HOME/.cache/mkbootimg python3 "$HOME/.cache/mkbootimg/mkbootimg.py" \

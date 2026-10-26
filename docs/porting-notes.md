@@ -1197,3 +1197,15 @@ systemd-analyze
 
 面板点亮已经是 2.6s（`venus-k2: on 序列` + `Console: switching ... 90x100`），
 所以"上电即刷日志"在软件上成立。
+
+### "开机黑屏 1 分钟"的真因：日志只去了串口
+
+现象（用户观察）：按电源 → 米标 → 花屏约 2.6s → 黑屏约 1 分钟 → 桌面出现才亮。
+
+原因不是面板没亮，而是 **cmdline 只有 `console=ttyGS0`，内核日志全进了串口**，
+屏幕上没有任何内容被绘制。面板在 2.5s 就被我们点亮并绑定 fbcon
+（`Console: switching to colour frame buffer device 90x100`），但 fbcon 没人喂字符，
+自然保持黑屏；直到 KWin 起来才第一次真正上屏。
+
+修法（与 Ubuntu 等发行版一致）：cmdline 里同时给 **`console=tty0`**（屏幕）和
+`console=ttyGS0`（串口调试）。这样从 2.5s 起内核日志就在屏幕上滚动。

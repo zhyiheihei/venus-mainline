@@ -930,3 +930,33 @@ readelf -n msm.ko | grep 'Build ID'                            → 文件里的 
 → 映射是**正向**：`寄存器值 = brightness * 2047 / 255`，代码现实现正确。
 AMOLED 深色内容下亮度变化几乎看不出来，测试必须先把屏刷成纯白
 （`dd if=/dev/zero bs=1M count=20 | tr '\0' '\377' | dd of=/dev/fb0`）。默认亮度定为 128。
+
+### 已知小瑕疵：加载图像时偶发一块花屏（会自己消失）
+
+现象：开机/加载画面过程中，屏幕上出现一小块撕裂/花屏，画面稳定后自动消失。
+`dmesg` 里没有任何 DSI/DPU 报错（`dsi_err|FIFO|underflow` 计数为 0）。
+
+原因（代码依据）：主线 msm 的 DSI 驱动**完全不支持 DSI TE**——
+`drivers/gpu/drm/msm/dsi/` 里没有任何 `te-pin-select` / `te-using-te-pin` / TE 中断处理代码。
+所以我们只能靠"PP tearcheck + 假的 19.2MHz vsync"来 paced 命令模式面板：
+
+```
+tc_cfg.vsync_count = 19200000 / (vtotal(3280) * 120) = 48
+```
+
+这个值不是面板真实 TE 节奏，kickoff 偶尔会落在面板正在扫描的时刻 → 出现一块撕裂。
+屏幕静止后不再 kickoff，所以花屏自己消失。
+
+彻底修法需要给主线 DSI 补 TE 支持（解析 `qcom,mdss-dsi-te-*`、打开 TE 中断、
+把 TE 事件接到 INTF vsync），是独立的驱动工作量；`te-source = "mdp_intf0"`
+单改设备树没用（没有 TE 事件源），而且实测会把整机挂死。当前按"可接受的外观瑕疵"记录。
+
+### 事故记录：一次改三样导致刷机后卡在启动早期
+
+v110（触屏节点）一次性加了 `&spi11` 的 pinctrl 覆盖 + `ts_avdd` 稳压器 +
+`&vreg_l3c_3p0` 强制 3.3V，刷入后设备卡在启动早期（WiFi/USB/COM3 全无，只有花屏）。
+回滚镜像 `v111-display-safe`（只去掉这三样）后立刻恢复。
+
+教训：设备树改动必须**一次只加一个节点**；L3C 是共享 PMIC 轨，强制改电压风险最高。
+另外发现生成的 DTS 本来就带 `&spi11 { status = "okay" }`（来自 star 参考），
+所以 spi11 控制器此前一直是开着的，卡死不是它本身。

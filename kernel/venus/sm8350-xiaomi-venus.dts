@@ -1324,11 +1324,11 @@
 	remote-endpoint = <&venus_panel_in>;
 	data-lanes = <0 1 2 3>;
 	/*
-	 * 命令模式的帧提交需要 vsync 源。mdp_vsync_e 是外部 TE 引脚（这块板子没接），
-	 * 于是永远等不到 TE → 只有 modeset 那一帧能下发，屏幕表现为"纯色、不刷新"。
-	 * 改用 DSI 控制器内部的 intf TE（mdp_intf0），由我们自己的时序产生 vsync。
+	 * 命令模式的帧提交需要 vsync 源。实测可用的是 mdp_vsync_e（配合 msm 里
+	 * tearcheck 的 19.2MHz 兜底补丁，见 dpu_encoder_phys_cmd.c）。
+	 * 试过 mdp_intf0 + 给 mdss 补 vsync 时钟，会把整机挂死，别再重复。
 	 */
-	qcom,te-source = "mdp_intf0";
+	qcom,te-source = "mdp_vsync_e";
 };
 
 &mdss_dsi0 {
@@ -1347,56 +1347,6 @@
 				remote-endpoint = <&mdss_dsi0_out>;
 			};
 		};
-	};
-};
-
-/* ---- 触摸: ST FTS on spi11 (qupv3 SE11) ---- */
-/ {
-	/*
-	 * 触摸 AVDD：厂商用的是 PM8350C L3（3.3V）+ GPIO132 负载开关，
-	 * 所以这里把 ts_avdd 做成「受 L3 供电的开关」——使能它时内核会连带把
-	 * L3 打开，缺了这一步触摸控制器根本不上电（表现为读寄存器全 0、
-	 * INT 一直被拉住导致中断风暴）。
-	 */
-	ts_avdd: regulator-ts-avdd {
-		compatible = "regulator-fixed";
-		regulator-name = "ts_avdd";
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-		vin-supply = <&vreg_l3c_3p0>;
-		gpio = <&tlmm 132 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		startup-delay-us = <4000>;
-	};
-};
-
-&tlmm {
-	venus_ts_spi_pins: venus-ts-spi-pins {
-		pins = "gpio48", "gpio49", "gpio50", "gpio51";
-		function = "qup11";
-		drive-strength = <6>;
-		bias-disable;
-	};
-};
-
-&spi11 {
-	status = "okay";
-	pinctrl-names = "default";
-	pinctrl-0 = <&venus_ts_spi_pins>;
-
-	touchscreen@0 {
-		compatible = "st,venus-fts";
-		reg = <0>;
-		spi-max-frequency = <7000000>;
-		interrupt-parent = <&tlmm>;
-		interrupts = <23 IRQ_TYPE_LEVEL_LOW>;
-		reset-gpios = <&tlmm 22 GPIO_ACTIVE_LOW>;
-		vdd-supply = <&vreg_l2c_1p8>;
-		avdd-supply = <&ts_avdd>;
-		touchscreen-size-x = <1440>;
-		touchscreen-size-y = <3200>;
-		touchscreen-inverted-x;
-		touchscreen-swapped-x-y;
 	};
 };
 
@@ -1454,23 +1404,3 @@
 &ipa { status = "disabled"; };
 
 
-/*
- * mdss 需要 "vsync" 时钟：dpu_encoder_phys_cmd_tearcheck_config() 里
- *   vsync_hz = dpu_kms_get_clk_rate(dpu_kms, "vsync")
- * 拿不到就 return（tearcheck 不使能）→ 命令模式面板的 read pointer 永不前进
- * → PP_DONE 不来 → 只有 modeset 那一帧下发，屏幕停在纯色不刷新。
- * 上游 sm8350.dtsi 的 mdss 时钟表里没有 vsync，但 dispcc（sm8250 同款）提供。
- */
-&mdss {
-	clocks = <&dispcc DISP_CC_MDSS_AHB_CLK>,
-		 <&gcc GCC_DISP_HF_AXI_CLK>,
-		 <&gcc GCC_DISP_SF_AXI_CLK>,
-		 <&dispcc DISP_CC_MDSS_MDP_CLK>,
-		 <&dispcc DISP_CC_MDSS_VSYNC_CLK>;
-	clock-names = "iface", "bus", "nrt_bus", "core", "vsync";
-};
-
-&vreg_l3c_3p0 {
-	regulator-min-microvolt = <3300000>;
-	regulator-max-microvolt = <3300000>;
-};

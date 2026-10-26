@@ -304,6 +304,8 @@ in
     "qcom-refgen-regulator" "cec" "drm_display_helper" "drm_dp_aux_bus"
     "drm_exec" "drm_gpuvm" "gpu-sched" "mdt_loader" "ubwc_config"
     "msm" "panel-xiaomi-venus-k2"
+    # device-mapper：initrd 里 LVM/磁盘相关步骤需要它，缺了会白等约 30 秒
+    "dm-mod"
   ];
 
   # ---------- 显示模块尽早加载 ----------

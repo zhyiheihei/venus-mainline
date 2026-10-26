@@ -1180,3 +1180,20 @@ minor= ((e[7] & 0xC0) >> 2) | (e[6] & 0x0F)
   （ABL 的 splash 帧缓冲）；msm 在 2.2s 接管后 fbcon 重新绑定，这中间有一次切换。
 - 圆角盲区：fbcon 无内容边距（`fb_var_screeninfo` 的 margin 是消隐时序）。
   真要留白得给控制台用略小的模式，属于后续。
+
+### 启动耗时记录（待解决）
+
+```
+systemd-analyze
+  Startup finished in 35.6s (kernel) + 35.0s (userspace) = 1min 10s
+```
+
+其中"kernel 35.6s"实际是 **initrd/stage-1 花了 30 秒**：dmesg 显示 stage-1 在 3.5s
+完成根分区挂载后静默到 33s 才打印 `loading module ...`。
+已排除：`udevadm settle`（在运行系统上复测只要 0.58s）、缺 `dm_mod`
+（把它放进 initrd 无变化）。下一步怀疑 `lvm vgchange -ay` 或 initrd 内 udev coldplug
+触发的慢 probe（现在 `/lib/modules` 有全部 605 个模块，ath11k/pcie 等在 WiFi 电源
+未开的情况下 probe 会超时重试）。
+
+面板点亮已经是 2.6s（`venus-k2: on 序列` + `Console: switching ... 90x100`），
+所以"上电即刷日志"在软件上成立。

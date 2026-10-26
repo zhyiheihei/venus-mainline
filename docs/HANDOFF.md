@@ -8,27 +8,32 @@
 > 但**铁律是: 任何叙述都可用一条命令重新验证(验证命令已附), 验证优先于信任叙述**。
 > 对无验证命令支撑的推断(标 🔶), 当作假设而非事实。
 
-## 最新状态（2026-10-26 更新，覆盖下面旧叙述）
+## 最新状态（2026-10-26 晚间更新，覆盖下面旧叙述）
 
-设备现在跑的是 **NixOS 25.05**（不是 Android/EvoX），从 boot_b 引导我们自建的内核 7.2.6。
+设备跑 **NixOS 25.05**（自建内核 7.2.6），从 boot_b 引导。
 
-**已证实可用**：UFS / USB 串口+网络 / WiFi（开机自连 <LAN_PHONE_IP>）/ SSH / GPU（Adreno 660，
-turnip+freedreno，glmark2 413@1440x3200）/ 面板上电+背光+初始化（`power_mode=0x9c`）/
-sway 桌面合成（grim 能抓 1440x3200 帧）/ 三颗按键（电源、音量+、音量-）。
+**已实测可用**：UFS / USB 串口 / WiFi（开机自连 <LAN_PHONE_IP>，`ssh venus`）/ GPU（Adreno 660，
+turnip+freedreno，glmark2 413@1440x3200）/ **面板显示（含刷新）** / 背光（正向映射，默认 128）/
+**KDE Plasma 6 桌面（SDDM 免登录）** / 三颗按键。
 
-**唯一未过的坎**：命令模式面板**不刷新** —— 只有 modeset 那一帧下发，屏幕停在纯色。
-根因与失败尝试清单见 `docs/porting-notes.md`「2026-10-26」一节（mdss 缺 vsync 时钟 →
-tearcheck 不使能 → PP_DONE 不来）。触摸同样未通（芯片读回全 0，疑似未真正上电）。
+**屏幕刷新问题已解决**：根因是 `sm8350.dtsi` 的 mdss 没有 `vsync` 时钟 →
+`dpu_encoder_phys_cmd_tearcheck_config()` 拿不到频率直接 return → tearcheck 不使能 →
+命令模式面板只有 modeset 首帧。修法是取不到时用 19.2MHz 兜底（改在
+`drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c`）。**部署时必须核对 build-id**，
+别把旧模块当成新的（我差点误判）。
 
-**操作纪律（血泪）**：
-- `systemctl reboot` 在这台机器上**不生效**，重启只用 `echo b > /proc/sysrq-trigger`；
-  否则会误以为"改完验证过了"，实际还在跑旧模块。
-- `tools/vpush.sh` 偶发推成 0 字节，推送后必须核对字节数。
-- 设备树改动风险极高：本轮两次"只改 DTB"（te-source、mdss vsync 时钟）都让整机挂死。
-- 显示模块不在开机自动加载（cmdline 带 `systemd.mask=venus-display.service`），
-  系统起来后手动 insmod `/root/ko/*.ko`。
-- 已知良好镜像：`venus-boot-v107-touch-pwr.img`；源码存档 tag `screen-ok-v101`；
-  `~/mi11-work/known-good/` 下另有对应 boot.img 与模块包。
+**仍未通**：触屏（`fts-spi-venus` 驱动在仓库里，但 DTB 里没有 `spi11/touchscreen@0` 节点，
+所以没绑定；且芯片读回全 0，上电时序待查）。充电/电池仍无主线驱动。
+
+**操作纪律（血泪，照做）**：
+- 重启只用 `echo b > /proc/sysrq-trigger`（`systemctl reboot` 在这台机器上不生效）。
+- 测 DRM 设备权限只能用 `open()`，**绝不要 `read()`**：`dd if=/dev/dri/card1` 会永久阻塞并占住设备，
+  之后 KWin 会报 `Device or resource busy`、Plasma 起不来。
+- 仓库 HEAD 的 DTS 里有**实验性且会挂机**的改动（`te-source = "mdp_intf0"`、给 mdss 加 `vsync` 时钟），
+  设备上跑的是更早那份 `te-source = "mdp_vsync_e"`。重打 DTB 前必须先把这两处退回。
+- `git tag screen-ok-v101` 指向的提交含上述实验性改动与触屏代码，**不能当回滚点**。
+- 已知良好镜像：`~/mi11-work/known-good/boot-screen-ok-v101.img`；
+  模块包：`/root/ko/`（`msm.ko` 已换成带兜底补丁的版本，`msm-old.ko` 可回退）。
 
 ## 〇、置信度分级说明
 

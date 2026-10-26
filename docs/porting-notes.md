@@ -854,3 +854,79 @@ arch/arm64/boot/dts/qcom/sm8350.dtsi 的 mdss clocks 只有
 - `~/mi11-work/known-good/boot-screen-ok-v101.img`（对应启动镜像）
 - `~/mi11-work/known-good/ko-current.tgz`（当时的全部内核模块）
 - 可启动镜像：`venus-boot-v107-touch-pwr.img`（当前已知最稳）
+
+## 2026-10-26（续）· 屏幕刷新打通：tearcheck 兜底补丁生效
+
+**结论：命令模式面板的"只有首帧、不刷新"已解决。**
+
+根因链（每一步都有设备端输出为证）：
+
+1. `sm8350.dtsi` 的 `mdss` 只提供 `iface/bus/nrt_bus/core` 四个时钟，
+   没有 `vsync`。验证：`tr '\0' ' ' < /proc/device-tree/soc@0/display-subsystem@ae00000/clock-names`
+   → `iface bus nrt_bus core`。
+2. `drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c` 的
+   `dpu_encoder_phys_cmd_tearcheck_config()` 里
+   `vsync_hz = dpu_kms_get_clk_rate(dpu_kms, "vsync"); if (!vsync_hz) return;`
+   —— 拿到 0 就直接返回，tearcheck 永不使能 → 命令模式面板 read pointer 不前进
+   → `PP_DONE` 不来 → 只有 modeset 那一帧下发。
+3. 修法：在取不到 vsync 时钟时用 19.2MHz（dispcc vsync 源默认频率）兜底，
+   让 `tc_cfg.vsync_count` 能算出来、tearcheck 得以编程。补丁位置同上函数的 `if (!vsync_hz)` 分支。
+
+**验证方式（客观判据，不靠肉眼猜）**：
+用 `swaymsg output * bg #RRGGBB solid_color` 依次刷 红/绿/蓝/白（每色 3 秒，5 轮），
+用户确认**颜色在变**；同时 `dmesg` 里 `commit done / wait timeout` 计数为 0（提交没有超时）。
+合成器侧用 `grim` 抓帧交叉核对像素值。
+
+**注意：必须确认加载的是带补丁的模块**（我这次差点误判）。可靠的判据是 build-id：
+
+```
+cat /sys/module/msm/notes/.note.gnu.build-id | od -An -tx1     → 已加载模块的 build-id
+readelf -n msm.ko | grep 'Build ID'                            → 文件里的 build-id
+```
+
+旧模块 `58834e31…`（8777856 字节）无补丁；新模块 `cc847674…`（8778024 字节）有补丁。
+
+### 顺带澄清的两件事
+
+- **触屏那轮改动并没有弄坏显示**。设备上跑的 DTB 是更早的那份
+  （`qcom,te-source = "mdp_vsync_e"`、无 touch 节点），仓库 HEAD 里的
+  `te-source = "mdp_intf0"` 和 `mdss` 加 `vsync` 时钟**从未进过设备**；
+  `fts-spi-venus` 因为没有 DT 节点根本没绑定（`/dev/input` 只有 3 个按键设备）。
+- **AMOLED 没有背光**：屏上内容全黑时看起来就是"背光没亮"。
+  判断面板是否工作时，必须先把屏刷成纯白（`swaymsg output * bg #ffffff`），
+  否则会把"黑色内容"误判成"面板没通电"。
+
+### 已知遗留（下一步）
+
+- `swayidle` 的 180 秒自动关背光会让人误以为故障，桌面改用 Plasma 后已移除该逻辑。
+- 亮度映射方向未最终定论（代码现为正向：`brightness*2047/255`），待 0/128/255 三档实测。
+- `git tag screen-ok-v101` 指向的提交里带着实验性 DTS（`te-source=mdp_intf0`、mdss vsync 时钟）
+  与触屏代码，**不能当回滚点**，需要重新标注。
+
+### 桌面环境（KDE Plasma 6）与背光实测
+
+- 桌面改为 **Plasma 6 + SDDM 免登录**（与本机 NixOS 主机同款）。
+  `services.desktopManager.plasma6.enable = true` + `services.displayManager.sddm`（wayland.enable）
+  + `services.displayManager.autoLogin.user = "venus"`。
+- ⚠️ **greetd 在这台机器上用不通**：`greetd` 要求 `default_session` 必须有 command
+  （只写 `initial_session` 会直接 `default_session contains no command` 退出）；
+  补上之后 KWin 仍然报
+  `kwin_core: Failed to activate /org/freedesktop/login1/session/_N session`
+  → 会话不是 logind 的普通用户会话。换 SDDM 一次成功，别再折腾 greetd。
+- ⚠️ **踩过的自伤坑**：为了测 DRM 权限我跑过 `dd if=/dev/dri/card1`，
+  而**读 DRM 设备会永久阻塞**，那三个 dd 进程把 `/dev/dri/card1` 的 fd 一直占着，
+  于是 KWin 报 `Failed to open /dev/dri/card1 device (Device or resource busy)`，
+  Plasma 反复起不来。杀掉它们、重启 display-manager 立刻正常。
+  教训：测 DRM 权限只用 `open()+ioctl`，绝不要 `read()`。
+- 显示模块加载服务改名 `venus-drm.service`（原 `venus-display.service` 被 cmdline 的
+  `systemd.mask=` 挡住，改名后就能开机自动加载），并 `before = [ "display-manager.service" ]`，
+  保证 Plasma 启动时 `/dev/dri/card1` 已存在。
+
+**背光亮度实测（一次一变，纯白画面下判断）**：
+
+```
+255 → 亮；64 → 明显变暗（灰）；0 → 全黑
+```
+→ 映射是**正向**：`寄存器值 = brightness * 2047 / 255`，代码现实现正确。
+AMOLED 深色内容下亮度变化几乎看不出来，测试必须先把屏刷成纯白
+（`dd if=/dev/zero bs=1M count=20 | tr '\0' '\377' | dd of=/dev/fb0`）。默认亮度定为 128。

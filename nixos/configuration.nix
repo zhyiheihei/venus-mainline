@@ -85,7 +85,7 @@ in
     wantedBy = [ "getty.target" ];
     serviceConfig = { Restart = "always"; RestartSec = 1; };
   };
-  # tty1 自动登录普通用户并直接进 sway（sway 不接受 root）
+  # greetd 负责拉桌面；tty1 不开 sway，保留自动登录方便串口/本地登录
   services.getty.autologinUser = "venus";
 
   # ---------- venus 专有：WiFi 上电 + PCIe 重训 + 网络 ----------
@@ -161,16 +161,24 @@ in
     '';
   };
 
-  # ---------- 桌面环境（Sway，可直接从 SSH 驱动，便于取色/截图验证）----------
-  # 选 sway 而不是 GNOME 的理由：它不需要登录管理器、RAM 占用小，
-  # 而且可以通过 swaymsg（SSH）和 grim（截图）完全脚本化控制 —— 手机上
-  # 还没通触屏时，这是唯一能"用"起来的桌面，也是核对颜色的客观手段。
-  programs.sway = {
+  # ---------- 桌面环境（KDE Plasma 6，与本机 NixOS 主机同款）----------
+  # 本机主机跑的是 Plasma 6 + greetd(startplasma-wayland)，这里对齐同一套。
+  # 选 Plasma 而不是 GNOME 的理由：本机同款，且 Wayland 会话不需要 Xorg。
+  services.desktopManager.plasma6.enable = true;
+  services.displayManager.defaultSession = "plasma";
+  security.polkit.enable = true;
+
+  # 用 SDDM（本机主机同款显示管理器）+ 免登录，直接进 Plasma Wayland 会话
+  services.displayManager.sddm = {
     enable = true;
-    wrapperFeatures.gtk = true;
+    wayland.enable = true;
+  };
+  services.displayManager.autoLogin = {
+    enable = true;
+    user = "venus";
   };
 
-  # 给桌面用的普通用户（sway 不接受 root），tty1 自动登录直接进 sway
+  # 桌面用户（Plasma 不接受 root）
   users.users.venus = {
     isNormalUser = true;
     uid = 1000;
@@ -181,7 +189,6 @@ in
     ];
   };
   security.sudo.wheelNeedsPassword = false;
-
 
   # 电源键：交给桌面处理（没有真正 suspend 支持，别让 logind 直接关机）
   services.logind.extraConfig = ''
@@ -197,9 +204,9 @@ in
     S=/run/venus-bl-saved
     case "$1" in
       off) cat $BL/brightness > $S 2>/dev/null; echo 0 > $BL/brightness ;;
-      on)  [ -s $S ] && cat $S > $BL/brightness || echo 153 > $BL/brightness ;;
+      on)  [ -s $S ] && cat $S > $BL/brightness || echo 128 > $BL/brightness ;;
       *)   cur=$(cat $BL/brightness); if [ "$cur" = "0" ]; then
-             [ -s $S ] && cat $S > $BL/brightness || echo 153 > $BL/brightness
+             [ -s $S ] && cat $S > $BL/brightness || echo 128 > $BL/brightness
            else
              echo $cur > $S; echo 0 > $BL/brightness
            fi ;;
@@ -207,56 +214,18 @@ in
   '';
   environment.etc."venus-bl-toggle.sh".mode = "0755";
 
-  # 开机把亮度恢复到 60%（systemd-backlight 会用旧值覆盖，这里排在它之后）
+  # 开机把亮度设到 50%（systemd-backlight 会用旧值覆盖，这里排在它之后）
   systemd.services.venus-brightness = {
-    description = "venus: 开机设置面板亮度 60%";
+    description = "venus: 开机设置面板亮度";
     wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-backlight@backlight:ae94000.dsi.0.service" "venus-display.service" ];
+    after = [ "systemd-backlight@backlight:ae94000.dsi.0.service" "venus-drm.service" ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       B=/sys/class/backlight/ae94000.dsi.0/brightness
       [ -e "$B" ] || exit 0
-      echo 153 > "$B" 2>/dev/null || true
+      echo 128 > "$B" 2>/dev/null || true
     '';
   };
-
-  # sway 配置：空闲关屏 + 电源键唤醒/切换
-  environment.etc."sway/config".text = ''
-    set $mod Mod4
-    font pango:DejaVu Sans Mono 10
-    default_border pixel 2
-
-    # 背景
-    output * bg #102030 solid_color
-    output DSI-1 bg #102030 solid_color
-
-    # 终端与启动器
-    bindsym $mod+Return exec foot
-    bindsym $mod+d exec fuzzel
-    bindsym $mod+Shift+q kill
-
-    # 电源键：按一下关屏、再按一下亮屏（只动背光）
-    bindsym --locked XF86PowerOff exec /etc/venus-bl-toggle.sh
-    bindsym --locked XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
-    bindsym --locked XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
-
-    # 空闲 2 分钟关屏，任何输入立即恢复
-    # 空闲 3 分钟关背光，任何输入立即恢复
-    exec swayidle -w \
-      timeout 180 '/etc/venus-bl-toggle.sh off' \
-      resume '/etc/venus-bl-toggle.sh on'
-
-    include /etc/sway/config.d/*
-  '';
-
-  environment.loginShellInit = ''
-    if [ -z "$WAYLAND_DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
-      exec sway
-    fi
-  '';
-
-  # 取色/截图/控制工具
-
 
   # ---------- 图形（GPU/DRM）----------
   # 让 mesa 的 freedreno（msm_dri.so）和 turnip（vulkan）通过 /run/opengl-driver 可用
@@ -267,10 +236,12 @@ in
 
   # 显示驱动在内核里是 =m（避免 probe 卡死时连 /init 都起不来），
   # 这里按依赖顺序在开机时加载。
-  systemd.services.venus-display = {
+  systemd.services.venus-drm = {
     description = "venus: 加载 DRM/显示模块（refgen → msm → panel）";
     wantedBy = [ "multi-user.target" ];
-    after = [ "multi-user.target" "systemd-udev-settle.service" ];
+    # 必须早于桌面：Plasma 启动时 DRM 设备得已经存在
+    before = [ "greetd.service" "display-manager.service" ];
+    after = [ "systemd-udev-settle.service" "venus-wifi-power.service" ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 120; };
     script = ''
       set -u
@@ -280,7 +251,7 @@ in
       sleep 5
       for m in qcom-pon qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus \
                drm_exec drm_gpuvm gpu-sched mdt_loader ubwc_config msm \
-               panel-xiaomi-venus-k2 spi-geni-qcom fts-spi-venus; do
+               panel-xiaomi-venus-k2; do
         ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || ${pkgs.kmod}/bin/insmod "$K/$m.ko" 2>/dev/null || true
       done
     '';
@@ -293,7 +264,7 @@ in
   environment.systemPackages = with pkgs; [
     vim git htop tmux rsync curl wget iw wpa_supplicant usbutils pciutils busybox e2fsprogs zstd
     # 桌面/取色/截图
-    grim slurp swaybg wlr-randr foot fuzzel mako imagemagick swayidle brightnessctl
+    imagemagick
   ];
   services.udev.packages = [ pkgs.usbutils ];
   nix.settings.experimental-features = [ "nix-command" "flakes" ];

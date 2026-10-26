@@ -8,6 +8,28 @@
 > 但**铁律是: 任何叙述都可用一条命令重新验证(验证命令已附), 验证优先于信任叙述**。
 > 对无验证命令支撑的推断(标 🔶), 当作假设而非事实。
 
+## 最新状态（2026-10-26 更新，覆盖下面旧叙述）
+
+设备现在跑的是 **NixOS 25.05**（不是 Android/EvoX），从 boot_b 引导我们自建的内核 7.2.6。
+
+**已证实可用**：UFS / USB 串口+网络 / WiFi（开机自连 <LAN_PHONE_IP>）/ SSH / GPU（Adreno 660，
+turnip+freedreno，glmark2 413@1440x3200）/ 面板上电+背光+初始化（`power_mode=0x9c`）/
+sway 桌面合成（grim 能抓 1440x3200 帧）/ 三颗按键（电源、音量+、音量-）。
+
+**唯一未过的坎**：命令模式面板**不刷新** —— 只有 modeset 那一帧下发，屏幕停在纯色。
+根因与失败尝试清单见 `docs/porting-notes.md`「2026-10-26」一节（mdss 缺 vsync 时钟 →
+tearcheck 不使能 → PP_DONE 不来）。触摸同样未通（芯片读回全 0，疑似未真正上电）。
+
+**操作纪律（血泪）**：
+- `systemctl reboot` 在这台机器上**不生效**，重启只用 `echo b > /proc/sysrq-trigger`；
+  否则会误以为"改完验证过了"，实际还在跑旧模块。
+- `tools/vpush.sh` 偶发推成 0 字节，推送后必须核对字节数。
+- 设备树改动风险极高：本轮两次"只改 DTB"（te-source、mdss vsync 时钟）都让整机挂死。
+- 显示模块不在开机自动加载（cmdline 带 `systemd.mask=venus-display.service`），
+  系统起来后手动 insmod `/root/ko/*.ko`。
+- 已知良好镜像：`venus-boot-v107-touch-pwr.img`；源码存档 tag `screen-ok-v101`；
+  `~/mi11-work/known-good/` 下另有对应 boot.img 与模块包。
+
 ## 〇、置信度分级说明
 
 - ✅ = 直接多次观测/带验证命令, 可直接采信(但仍建议首次使用时重新验证)

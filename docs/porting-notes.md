@@ -1079,3 +1079,60 @@ venus-fts: 第 0 次读到事件 [03 00 00 00 00 00 00 00]  <<< 芯片就绪
 
 下一步：照厂商 `fts_init()` 走 —— `fts_system_reset()`（GPIO 分支）→ `readSysInfo()` →
 `fts_init_sensing()`（`setScanMode(SCAN_MODE_ACTIVE)` 开扫描）→ 打开中断并解析 8 字节 MT 事件。
+
+## 2026-10-26 深夜 · 触屏打通（完整配方）
+
+**状态：触屏可用，桌面（KDE Plasma 6）响应触摸，已开机自动加载。**
+
+### 决定性的一步：`setScanMode(ACTIVE, 0x01)`
+
+厂商 `fts_mode_handler()` 的 "Sense ON" 是 `setScanMode(SCAN_MODE_ACTIVE, 0x01)`，
+即命令 `{0xA0, 0x00, 0x01}`。我之前发的是 `{0xA0, 0x00, 0x00}` —— 写寄存器成功、
+返回 rc=0，但**芯片不产生任何触摸事件**。改 0x01 后立刻出事件：
+
+```
+触摸事件 [23 21 c9 03 4c 13 54 00]   → id=2, x=0x3c9=969, y=0x4c0=1216
+触摸事件 [23 01 53 c2 30 01 54 02]   → id=0, x=0x253=595, y=0x300=780
+```
+
+### 完整启动序列（已验证，顺序不能变）
+
+1. 加载 `spi-geni-qcom`（否则 `/sys/bus/spi/devices/` 里没有 `spi1.0`，驱动不会被 probe ——
+   我一度因此误判成"芯片不应答"）
+2. 上电时序：复位**保持有效**（物理低）→ vdd → 1ms → avdd → 5ms → 10ms → 释放复位
+   （`reset-gpios` 是 ACTIVE_LOW，`gpiod_set_value(1)` = 复位）
+3. 复位脉冲：拉低 12ms → 拉高 → 5ms
+4. 轮询 `0x87` 读 8 字节（SPI 下第 0 字节是 dummy），等首字节 `0x03`（CONTROLLER_READY）
+5. `writeSysCmd {0xA4,0x06,0x01}` 载入 → `0xA7` 读 208 字节 sysinfo
+   校验：签名 `0xa5`，chip id 在 [10][11] = `0x39 0x36`（= DCHIP_ID_1/DCHIP_ID_0）
+6. `{0xA0, 0x00, 0x01}` 开扫描
+7. 注册中断并 `input_register_device`，事件 `0x13/0x23/0x33` 解析为 MT slot
+
+### 事件格式（厂商协议）
+
+```
+id   = (e[1] & 0xF0) >> 4     类型 = e[1] & 0x0F（1=手指 2=手套 3=悬停）
+x    = ((e[3] & 0x0F) << 8) | e[2]
+y    = (e[4] << 4) | ((e[3] & 0xF0) >> 4)
+major= ((e[0] & 0x0C) << 2) | ((e[6] & 0xF0) >> 4)
+minor= ((e[7] & 0xC0) >> 2) | (e[6] & 0x0F)
+```
+
+### 响应速度优化
+
+把「一个事件一次 SPI 往返」改成 **一次事务读回整条 FIFO（256 字节 = 32 事件）再解析**，
+用户实测"更跟手了"。7MHz 下单次 256 字节约 0.3ms，原来每个事件都要 2 个 transfer。
+
+### 排障期间的两条硬结论
+
+- `rmmod msm` 会 **Segmentation fault**，随后 `insmod` 报 `Device or resource busy`，
+  `/sys/class/drm/card1` 消失。别在运行中的系统上 rmmod msm，要重载显示栈就重启。
+- 面板出现"屏幕全黑、DPMS=On、背光=128、合成器在跑"时，先怀疑自己刚做的 rmmod/重载动作，
+  不要直接归因到面板或锁屏。
+
+### 相关文件
+
+- 驱动：`kernel/venus/fts-spi-venus.c`（约 460 行，纯 SPI，无 I2C 分支）
+- DTS：`sm8350-xiaomi-venus.dts` 的 `&spi11 { touchscreen@0 }` + `ts_avdd`（GPIO132 负载开关）
+- NixOS：`systemd.services.venus-touch`（insmod spi-geni-qcom → fts-spi-venus）、
+  `/etc/xdg/kscreenlockerrc`（Autolock=false，避免无键盘时锁死）

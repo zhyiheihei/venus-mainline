@@ -1,1037 +1,469 @@
 // SPDX-License-Identifier: GPL-2.0
-// STMicroelectronics FTS Touchscreen device driver
-//
-// Copyright (c) 2017 Samsung Electronics Co., Ltd.
-// Copyright (c) 2017 Andi Shyti <andi@etezian.org>
+/*
+ * STMicroelectronics FTS 触摸屏驱动（小米 11 / venus，3-wire SPI）
+ *
+ * 协议与时序全部照抄厂商实现
+ * （Evolution-X-Devices/kernel_xiaomi_venus, drivers/input/touchscreen/fts_spi）：
+ *
+ *  - 上电（fts_chip_powercycle）：复位保持有效 → vdd → 1ms → avdd → 5ms → 10ms → 释放复位
+ *  - 复位脉冲（fts_system_reset 的 GPIO 分支）：拉低 10ms → 拉高
+ *  - 读 FIFO 事件（pollForEvent）：命令 0x87 + 读 8 字节，SPI 下第 0 字节是 dummy
+ *  - 事件首字节 0x03 = EVT_ID_CONTROLLER_READY
+ *  - 读系统信息：writeSysCmd(0xA4,0x06,{0x01}) 后读 framebuffer 208 字节（命令 0xA7）
+ *  - 开扫描：{0xA0, mode, settings}
+ *  - 触点事件：0x13 enter / 0x23 motion / 0x33 leave
+ *      id  = (e[1] & 0xF0) >> 4, 类型 = e[1] & 0x0F
+ *      x   = ((e[3] & 0x0F) << 8) | e[2]
+ *      y   = (e[4] << 4) | ((e[3] & 0xF0) >> 4)
+ */
 
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/i2c.h>
-#include <linux/spi/spi.h>
+#include <linux/input.h>
 #include <linux/input/mt.h>
-#include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
-#include <linux/irq.h>
-#include <linux/leds.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/pm_runtime.h>
+#include <linux/mutex.h>
 #include <linux/regulator/consumer.h>
+#include <linux/spi/spi.h>
 
-/* I2C commands */
-#define STMFTS_READ_INFO			0x80
-#define STMFTS_READ_STATUS			0x84
-#define STMFTS_READ_ONE_EVENT			0x85
-#define STMFTS_READ_ALL_EVENT			0x86
-#define STMFTS_LATEST_EVENT			0x87
-#define STMFTS_SLEEP_IN				0x90
-#define STMFTS_SLEEP_OUT			0x91
-#define STMFTS_MS_MT_SENSE_OFF			0x92
-#define STMFTS_MS_MT_SENSE_ON			0x93
-#define STMFTS_SS_HOVER_SENSE_OFF		0x94
-#define STMFTS_SS_HOVER_SENSE_ON		0x95
-#define STMFTS_MS_KEY_SENSE_OFF			0x9a
-#define STMFTS_MS_KEY_SENSE_ON			0x9b
-#define STMFTS_SYSTEM_RESET			0xa0
-#define STMFTS_CLEAR_EVENT_STACK		0xa1
-#define STMFTS_FULL_FORCE_CALIBRATION		0xa2
-#define STMFTS_MS_CX_TUNING			0xa3
-#define STMFTS_SS_CX_TUNING			0xa4
+/* 厂商协议常量 */
+#define FTS_CMD_FIFO_READONE	0x87
+#define FTS_CMD_FRAMEBUFFER_R	0xA7
+#define FTS_CMD_SYSTEM		0xA4
+#define FTS_CMD_SCAN_MODE	0xA0
 
-/* events */
-#define STMFTS_EV_NO_EVENT			0x00
-#define STMFTS_EV_MULTI_TOUCH_DETECTED		0x02
-#define STMFTS_EV_MULTI_TOUCH_ENTER		0x03
-#define STMFTS_EV_MULTI_TOUCH_LEAVE		0x04
-#define STMFTS_EV_MULTI_TOUCH_MOTION		0x05
-#define STMFTS_EV_HOVER_ENTER			0x07
-#define STMFTS_EV_HOVER_LEAVE			0x08
-#define STMFTS_EV_HOVER_MOTION			0x09
-#define STMFTS_EV_KEY_STATUS			0x0e
-#define STMFTS_EV_ERROR				0x0f
-#define STMFTS_EV_CONTROLLER_READY		0x10
-#define STMFTS_EV_SLEEP_OUT_CONTROLLER_READY	0x11
-#define STMFTS_EV_STATUS			0x16
-#define STMFTS_EV_DEBUG				0xdb
+#define FTS_SYS_CMD_LOAD_DATA	0x06
+#define FTS_LOAD_SYS_INFO	0x01
+#define FTS_SCAN_MODE_ACTIVE	0x00
 
-/* multi touch related event masks */
-#define STMFTS_MASK_EVENT_ID			0x0f
-#define STMFTS_MASK_TOUCH_ID			0xf0
-#define STMFTS_MASK_LEFT_EVENT			0x0f
-#define STMFTS_MASK_X_MSB			0x0f
-#define STMFTS_MASK_Y_LSB			0xf0
+#define FTS_EVENT_SIZE		8
+#define FTS_MAX_EVENTS		32
+#define FTS_FIFO_READALL	0x87	/* SPI 下 READALL/READONE 同码：一次取回 FIFO 里所有事件 */
+#define FTS_EVT_NOEVENT		0x00
+#define FTS_EVT_CONTROLLER_READY	0x03
+#define FTS_EVT_ENTER_POINT	0x13
+#define FTS_EVT_MOTION_POINT	0x23
+#define FTS_EVT_LEAVE_POINT	0x33
+#define FTS_EVT_STATUS_UPDATE	0x43
+#define FTS_EVT_USER_REPORT	0x53
+#define FTS_EVT_DEBUG		0xE3
+#define FTS_EVT_ERROR		0xF3
 
-/* key related event masks */
-#define STMFTS_MASK_KEY_NO_TOUCH		0x00
-#define STMFTS_MASK_KEY_MENU			0x01
-#define STMFTS_MASK_KEY_BACK			0x02
+#define FTS_TOUCH_TYPE_FINGER	0x01
+#define FTS_TOUCH_TYPE_GLOVE	0x02
+#define FTS_TOUCH_TYPE_HOVER	0x03
 
-#define STMFTS_EVENT_SIZE	8
-#define STMFTS_STACK_DEPTH	32
-#define STMFTS_DATA_MAX_SIZE	(STMFTS_EVENT_SIZE * STMFTS_STACK_DEPTH)
-#define STMFTS_MAX_FINGERS	10
-#define STMFTS_DEV_NAME		"stmfts"
+#define FTS_SYSINFO_SIZE	208
+#define FTS_MAX_FINGERS		10
+#define FTS_CS_DELAY_US		10
 
-static const struct regulator_bulk_data stmfts_supplies[] = {
-	{ .supply = "vdd" },
-	{ .supply = "avdd" },
-};
-
-struct stmfts_data {
+struct venus_fts {
 	struct spi_device *spi;
 	struct device *dev;
-	int irq;
-	int num_supplies;
 	struct input_dev *input;
 	struct gpio_desc *reset_gpio;
-	bool chip_ok;		/* 芯片 ID 探测是否通过 */
-	struct led_classdev led_cdev;
-	struct mutex mutex;
-
-	struct touchscreen_properties prop;
-
 	struct regulator_bulk_data *supplies;
-
-	/*
-	 * Presence of ledvdd will be used also to check
-	 * whether the LED is supported.
-	 */
-	struct regulator *ledvdd;
-
-	u16 chip_id;
-	u8 chip_ver;
-	u16 fw_ver;
-	u8 config_id;
-	u8 config_ver;
-
-	u8 data[STMFTS_DATA_MAX_SIZE];
-
-	struct completion cmd_done;
-
-	bool use_key;
-	bool led_status;
-	bool hover_enabled;
-	bool running;
+	int num_supplies;
+	int irq;
+	struct mutex lock;	/* 保护 SPI 事务与事件读取 */
+	u16 x_max;
+	u16 y_max;
+	bool ready;
+	struct delayed_work poll_work;	/* 调试用轮询：绕开中断直接读事件 */
+	unsigned int poll_ms;
+	int log_budget;
 };
 
-static int stmfts_brightness_set(struct led_classdev *led_cdev,
-				 enum led_brightness value)
-{
-	struct stmfts_data *sdata = container_of(led_cdev,
-					struct stmfts_data, led_cdev);
-	int err;
+/* ---------- 底层 SPI 事务 ---------- */
 
-	if (value != sdata->led_status && sdata->ledvdd) {
-		if (!value) {
-			regulator_disable(sdata->ledvdd);
-		} else {
-			err = regulator_enable(sdata->ledvdd);
-			if (err) {
-				dev_warn(sdata->dev,
-					 "failed to enable ledvdd regulator: %d\n",
-					 err);
-				return err;
-			}
-		}
-		sdata->led_status = value;
+/*
+ * 厂商 fts_write_read：命令与数据必须在同一个 CS 内（同一个 spi_message 的两段 transfer），
+ * 中间抬起 CS 芯片会丢弃整次事务。读到的第 0 字节是 dummy，需要丢掉。
+ */
+static int venus_fts_xfer(struct venus_fts *ts, const u8 *tx, int tx_len,
+			  u8 *rx, int rx_len)
+{
+	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
+	struct spi_message msg;
+	int ret;
+
+	spi_message_init(&msg);
+
+	xfer[0].tx_buf = tx;
+	xfer[0].len = tx_len;
+	xfer[0].delay.value = FTS_CS_DELAY_US;
+	xfer[0].delay.unit = SPI_DELAY_UNIT_USECS;
+	spi_message_add_tail(&xfer[0], &msg);
+
+	if (rx && rx_len) {
+		xfer[1].rx_buf = rx;
+		xfer[1].len = rx_len + 1;	/* dummy + 数据 */
+		xfer[1].delay.value = FTS_CS_DELAY_US;
+		xfer[1].delay.unit = SPI_DELAY_UNIT_USECS;
+		spi_message_add_tail(&xfer[1], &msg);
 	}
+
+	ret = spi_sync(ts->spi, &msg);
+	if (ret)
+		return ret;
+
+	if (rx && rx_len)
+		memmove(rx, rx + 1, rx_len);
 
 	return 0;
 }
 
-static enum led_brightness stmfts_brightness_get(struct led_classdev *led_cdev)
+static int venus_fts_write(struct venus_fts *ts, const u8 *tx, int len)
 {
-	struct stmfts_data *sdata = container_of(led_cdev,
-						struct stmfts_data, led_cdev);
-
-	return !!regulator_is_enabled(sdata->ledvdd);
+	return venus_fts_xfer(ts, tx, len, NULL, 0);
 }
 
-/*
- * We can't simply use i2c_smbus_read_i2c_block_data because we
- * need to read 256 bytes, which exceeds the 255-byte SMBus block limit.
- */
-/* ST FTS 在这台机器上是 3-wire SPI：先发命令字节，再在同一 CS 内读数据。 */
-static int venus_fts_write(struct stmfts_data *sdata, u8 cmd)
+static int venus_fts_read_event(struct venus_fts *ts, u8 *ev)
 {
-	return spi_write(sdata->spi, &cmd, 1);
+	u8 cmd = FTS_CMD_FIFO_READONE;
+
+	return venus_fts_xfer(ts, &cmd, 1, ev, FTS_EVENT_SIZE);
 }
 
-static int venus_fts_read_block(struct stmfts_data *sdata, u8 cmd, int len, u8 *buf)
+/* 一次 SPI 事务把 FIFO 里的事件全部取回，减少往返（响应速度的关键） */
+static int venus_fts_read_all(struct venus_fts *ts, u8 *events, int *count)
 {
-	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
-	struct spi_message msg;
-	u8 tmp[264];
-	int ret;
+	u8 cmd = FTS_FIFO_READALL;
+	int ret, i;
 
-	if (len + 1 > sizeof(tmp))
-		return -EINVAL;
-
-	/*
-	 * 必须把「写命令」和「读数据」放进同一个 spi_message：
-	 * FTS 在 SPI 上要求 CS 在整个 命令+数据 期间保持有效（等价于 I2C 的
-	 * repeated start）。用 spi_write_then_read() 会在两者之间抬起 CS，
-	 * 芯片于是放弃这次事务 → 读回全 0、INT 一直拉低造成 6500 万次中断。
-	 */
-	spi_message_init(&msg);
-
-	xfer[0].tx_buf = &cmd;
-	xfer[0].len = 1;
-	spi_message_add_tail(&xfer[0], &msg);
-
-	/*
-	 * RX 侧会先收到我们刚发出去的命令字节（MISO 上看到 MOSI 的回显），
-	 * 所以多读 1 字节再丢掉它，剩下的才是芯片数据。
-	 */
-	xfer[1].rx_buf = tmp;
-	xfer[1].len = len + 1;
-	spi_message_add_tail(&xfer[1], &msg);
-
-	ret = spi_sync(sdata->spi, &msg);
-	if (ret < 0)
+	ret = venus_fts_xfer(ts, &cmd, 1, events, FTS_EVENT_SIZE * FTS_MAX_EVENTS);
+	if (ret)
 		return ret;
 
-	if (len <= 16)
-		dev_info(sdata->dev, "venus-fts: 原始读 cmd=0x%02x -> [%*ph]\n",
-			 cmd, len + 1, tmp);
+	for (i = 0; i < FTS_MAX_EVENTS; i++) {
+		if (events[i * FTS_EVENT_SIZE] == FTS_EVT_NOEVENT)
+			break;
+	}
+	*count = i;
 
-	if (tmp[0] == cmd)
-		memcpy(buf, tmp + 1, len);
-	else
-		memcpy(buf, tmp, len);
-
-	return len;
+	return 0;
 }
 
-static int stmfts_read_events(struct stmfts_data *sdata)
-{
-	u8 cmd = STMFTS_READ_ALL_EVENT;
+/* ---------- 上电 / 复位 ---------- */
 
-	return venus_fts_read_block(sdata, cmd, STMFTS_DATA_MAX_SIZE, sdata->data) < 0 ? -EIO : 0;
+static void venus_fts_power_cycle(struct venus_fts *ts)
+{
+	/* 复位保持有效（reset-gpios 是 ACTIVE_LOW，set(1) = 物理低） */
+	gpiod_set_value_cansleep(ts->reset_gpio, 1);
+
+	regulator_disable(ts->supplies[0].consumer);
+	regulator_disable(ts->supplies[1].consumer);
+	msleep(20);
+
+	regulator_enable(ts->supplies[0].consumer);	/* vdd 1.8V */
+	msleep(2);
+	regulator_enable(ts->supplies[1].consumer);	/* avdd 3.3V */
+	msleep(6);
+	msleep(10);
+
+	/* 释放复位 */
+	gpiod_set_value_cansleep(ts->reset_gpio, 0);
+	msleep(10);
+
+	/* 复位脉冲 */
+	gpiod_set_value_cansleep(ts->reset_gpio, 1);
+	msleep(12);
+	gpiod_set_value_cansleep(ts->reset_gpio, 0);
+	msleep(5);
 }
 
-static void stmfts_report_contact_event(struct stmfts_data *sdata,
-					const u8 event[])
+/* ---------- 协议步骤 ---------- */
+
+static int venus_fts_wait_ready(struct venus_fts *ts)
 {
-	u8 slot_id = (event[0] & STMFTS_MASK_TOUCH_ID) >> 4;
-	u16 x = event[1] | ((event[2] & STMFTS_MASK_X_MSB) << 8);
-	u16 y = (event[2] >> 4) | (event[3] << 4);
-	u8 maj = event[4];
-	u8 min = event[5];
-	u8 orientation = event[6];
-	u8 area = event[7];
+	u8 ev[FTS_EVENT_SIZE];
+	int i, ret;
 
-	input_mt_slot(sdata->input, slot_id);
-
-	input_mt_report_slot_state(sdata->input, MT_TOOL_FINGER, true);
-	input_report_abs(sdata->input, ABS_MT_POSITION_X, x);
-	input_report_abs(sdata->input, ABS_MT_POSITION_Y, y);
-	input_report_abs(sdata->input, ABS_MT_TOUCH_MAJOR, maj);
-	input_report_abs(sdata->input, ABS_MT_TOUCH_MINOR, min);
-	input_report_abs(sdata->input, ABS_MT_PRESSURE, area);
-	input_report_abs(sdata->input, ABS_MT_ORIENTATION, orientation);
-
-	input_sync(sdata->input);
-}
-
-static void stmfts_report_contact_release(struct stmfts_data *sdata,
-					  const u8 event[])
-{
-	u8 slot_id = (event[0] & STMFTS_MASK_TOUCH_ID) >> 4;
-
-	input_mt_slot(sdata->input, slot_id);
-	input_mt_report_slot_inactive(sdata->input);
-
-	input_sync(sdata->input);
-}
-
-static void stmfts_report_hover_event(struct stmfts_data *sdata,
-				      const u8 event[])
-{
-	u16 x = (event[2] << 4) | (event[4] >> 4);
-	u16 y = (event[3] << 4) | (event[4] & STMFTS_MASK_Y_LSB);
-	u8 z = event[5];
-
-	input_report_abs(sdata->input, ABS_X, x);
-	input_report_abs(sdata->input, ABS_Y, y);
-	input_report_abs(sdata->input, ABS_DISTANCE, z);
-
-	input_sync(sdata->input);
-}
-
-static void stmfts_report_key_event(struct stmfts_data *sdata, const u8 event[])
-{
-	switch (event[2]) {
-	case 0:
-		input_report_key(sdata->input, KEY_BACK, 0);
-		input_report_key(sdata->input, KEY_MENU, 0);
-		break;
-
-	case STMFTS_MASK_KEY_BACK:
-		input_report_key(sdata->input, KEY_BACK, 1);
-		break;
-
-	case STMFTS_MASK_KEY_MENU:
-		input_report_key(sdata->input, KEY_MENU, 1);
-		break;
-
-	default:
-		dev_warn(sdata->dev,
-			 "unknown key event: %#02x\n", event[2]);
-		break;
+	for (i = 0; i < 200; i++) {
+		ret = venus_fts_read_event(ts, ev);
+		if (ret)
+			return ret;
+		if (ev[0] == FTS_EVT_CONTROLLER_READY) {
+			dev_info(ts->dev, "venus-fts: 芯片就绪（第 %d 次轮询）\n", i);
+			return 0;
+		}
+		if (ev[0] == FTS_EVT_ERROR)
+			dev_warn(ts->dev, "venus-fts: 错误事件 [%*ph]\n",
+				 FTS_EVENT_SIZE, ev);
+		msleep(10);
 	}
 
-	input_sync(sdata->input);
+	return -ETIMEDOUT;
 }
 
-static void stmfts_parse_events(struct stmfts_data *sdata)
+static int venus_fts_read_sysinfo(struct venus_fts *ts)
 {
-	int i;
+	u8 load[3] = { FTS_CMD_SYSTEM, FTS_SYS_CMD_LOAD_DATA, FTS_LOAD_SYS_INFO };
+	u8 rd[3] = { FTS_CMD_FRAMEBUFFER_R, 0x00, 0x00 };
+	u8 info[FTS_SYSINFO_SIZE];
+	int ret;
 
-	for (i = 0; i < STMFTS_STACK_DEPTH; i++) {
-		u8 *event = &sdata->data[i * STMFTS_EVENT_SIZE];
+	ret = venus_fts_write(ts, load, sizeof(load));
+	if (ret)
+		return ret;
+	msleep(20);
 
-		switch (event[0]) {
-		case STMFTS_EV_CONTROLLER_READY:
-		case STMFTS_EV_SLEEP_OUT_CONTROLLER_READY:
-		case STMFTS_EV_STATUS:
-			complete(&sdata->cmd_done);
-			fallthrough;
+	ret = venus_fts_xfer(ts, rd, sizeof(rd), info, sizeof(info));
+	if (ret)
+		return ret;
 
-		case STMFTS_EV_NO_EVENT:
-		case STMFTS_EV_DEBUG:
-			return;
-		}
+	/* 厂商校验：data[0] 是头部签名 0xA5，chip id 在 [10]=0x39 [11]=0x36 */
+	if (info[0] != 0xa5)
+		dev_warn(ts->dev, "venus-fts: sysinfo 签名异常 0x%02x\n", info[0]);
 
-		switch (event[0] & STMFTS_MASK_EVENT_ID) {
-		case STMFTS_EV_MULTI_TOUCH_ENTER:
-		case STMFTS_EV_MULTI_TOUCH_MOTION:
-			stmfts_report_contact_event(sdata, event);
+	dev_info(ts->dev,
+		 "venus-fts: sysinfo 签名=0x%02x chipid=%02x%02x fwver=%02x.%02x 配置=%02x/%02x\n",
+		 info[0], info[10], info[11], info[5], info[4], info[7], info[8]);
+
+	return 0;
+}
+
+static int venus_fts_set_scan(struct venus_fts *ts, u8 mode, u8 settings)
+{
+	u8 cmd[3] = { FTS_CMD_SCAN_MODE, mode, settings };
+
+	return venus_fts_write(ts, cmd, sizeof(cmd));
+}
+
+/* ---------- 事件上报 ---------- */
+
+static void venus_fts_report_touch(struct venus_fts *ts, const u8 *ev)
+{
+	u8 id = (ev[1] & 0xf0) >> 4;
+	u8 type = ev[1] & 0x0f;
+	u16 x = ((ev[3] & 0x0f) << 8) | ev[2];
+	u16 y = (ev[4] << 4) | ((ev[3] & 0xf0) >> 4);
+	u8 major = ((ev[0] & 0x0c) << 2) | ((ev[6] & 0xf0) >> 4);
+	u8 minor = ((ev[7] & 0xc0) >> 2) | (ev[6] & 0x0f);
+	s8 angle = (s8)ev[5];
+
+	if (id >= FTS_MAX_FINGERS)
+		return;
+
+	if (type == FTS_TOUCH_TYPE_HOVER) {
+		input_report_abs(ts->input, ABS_X, x);
+		input_report_abs(ts->input, ABS_Y, y);
+		input_report_abs(ts->input, ABS_DISTANCE, 1);
+		input_sync(ts->input);
+		return;
+	}
+
+	if (type != FTS_TOUCH_TYPE_FINGER && type != FTS_TOUCH_TYPE_GLOVE)
+		return;
+
+	if (x > ts->x_max)
+		x = ts->x_max;
+	if (y > ts->y_max)
+		y = ts->y_max;
+
+	input_mt_slot(ts->input, id);
+	input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, true);
+	input_report_abs(ts->input, ABS_MT_POSITION_X, x);
+	input_report_abs(ts->input, ABS_MT_POSITION_Y, y);
+	input_report_abs(ts->input, ABS_MT_TOUCH_MAJOR, major);
+	input_report_abs(ts->input, ABS_MT_TOUCH_MINOR, minor);
+	input_report_abs(ts->input, ABS_MT_ORIENTATION, angle);
+	input_sync(ts->input);
+}
+
+static void venus_fts_report_release(struct venus_fts *ts, const u8 *ev)
+{
+	u8 id = (ev[1] & 0xf0) >> 4;
+
+	if (id >= FTS_MAX_FINGERS)
+		return;
+
+	input_mt_slot(ts->input, id);
+	input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, false);
+	input_sync(ts->input);
+}
+
+static void venus_fts_handle_events(struct venus_fts *ts)
+{
+	static u8 events[FTS_EVENT_SIZE * FTS_MAX_EVENTS];
+	int count, i, ret;
+
+	ret = venus_fts_read_all(ts, events, &count);
+	if (ret) {
+		dev_err(ts->dev, "venus-fts: 读事件失败 %d\n", ret);
+		return;
+	}
+
+	for (i = 0; i < count; i++) {
+		u8 *ev = &events[i * FTS_EVENT_SIZE];
+
+		switch (ev[0]) {
+		case FTS_EVT_ENTER_POINT:
+		case FTS_EVT_MOTION_POINT:
+			if (ts->log_budget > 0) {
+				ts->log_budget--;
+				dev_info(ts->dev, "venus-fts: 触摸事件 [%*ph]\n",
+					 FTS_EVENT_SIZE, ev);
+			}
+			venus_fts_report_touch(ts, ev);
 			break;
-
-		case STMFTS_EV_MULTI_TOUCH_LEAVE:
-			stmfts_report_contact_release(sdata, event);
+		case FTS_EVT_LEAVE_POINT:
+			venus_fts_report_release(ts, ev);
 			break;
-
-		case STMFTS_EV_HOVER_ENTER:
-		case STMFTS_EV_HOVER_LEAVE:
-		case STMFTS_EV_HOVER_MOTION:
-			stmfts_report_hover_event(sdata, event);
+		case FTS_EVT_ERROR:
+			dev_warn(ts->dev, "venus-fts: 错误事件 [%*ph]\n",
+				 FTS_EVENT_SIZE, ev);
 			break;
-
-		case STMFTS_EV_KEY_STATUS:
-			stmfts_report_key_event(sdata, event);
-			break;
-
-		case STMFTS_EV_ERROR:
-			dev_warn(sdata->dev,
-				 "error code: 0x%x%x%x%x%x%x",
-				 event[6], event[5], event[4],
-				 event[3], event[2], event[1]);
-			break;
-
 		default:
-			dev_err(sdata->dev,
-				"unknown event %#02x\n", event[0]);
+			break;
 		}
 	}
 }
 
-static irqreturn_t stmfts_irq_handler(int irq, void *dev)
+static void venus_fts_poll(struct work_struct *work)
 {
-	struct stmfts_data *sdata = dev;
-	int err;
+	struct venus_fts *ts = container_of(work, struct venus_fts, poll_work.work);
 
-	guard(mutex)(&sdata->mutex);
+	mutex_lock(&ts->lock);
+	if (ts->ready)
+		venus_fts_handle_events(ts);
+	mutex_unlock(&ts->lock);
 
-	err = stmfts_read_events(sdata);
-	if (unlikely(err))
-		dev_err(sdata->dev,
-			"failed to read events: %d\n", err);
-	else
-		stmfts_parse_events(sdata);
+	schedule_delayed_work(&ts->poll_work, msecs_to_jiffies(ts->poll_ms));
+}
+
+static irqreturn_t venus_fts_irq(int irq, void *data)
+{
+	struct venus_fts *ts = data;
+
+	mutex_lock(&ts->lock);
+	if (ts->ready)
+		venus_fts_handle_events(ts);
+	mutex_unlock(&ts->lock);
 
 	return IRQ_HANDLED;
 }
 
-static int stmfts_command(struct stmfts_data *sdata, const u8 cmd)
-{
-	int err;
-
-	reinit_completion(&sdata->cmd_done);
-
-	err = venus_fts_write(sdata, cmd);
-	if (err)
-		return err;
-
-	if (!wait_for_completion_timeout(&sdata->cmd_done,
-					 msecs_to_jiffies(1000)))
-		return -ETIMEDOUT;
-
-	return 0;
-}
-
-static int stmfts_input_open(struct input_dev *dev)
-{
-	struct stmfts_data *sdata = input_get_drvdata(dev);
-	int err;
-
-	err = pm_runtime_resume_and_get(sdata->dev);
-	if (err)
-		return err;
-
-	err = venus_fts_write(sdata, STMFTS_MS_MT_SENSE_ON);
-	if (err) {
-		pm_runtime_put_sync(sdata->dev);
-		return err;
-	}
-
-	scoped_guard(mutex, &sdata->mutex) {
-		sdata->running = true;
-
-		if (sdata->hover_enabled) {
-			err = venus_fts_write(sdata, STMFTS_SS_HOVER_SENSE_ON);
-			if (err)
-				dev_warn(sdata->dev,
-					 "failed to enable hover\n");
-		}
-	}
-
-	if (sdata->use_key) {
-		err = venus_fts_write(sdata, STMFTS_MS_KEY_SENSE_ON);
-		if (err)
-			/* I can still use only the touch screen */
-			dev_warn(sdata->dev,
-				 "failed to enable touchkey\n");
-	}
-
-	return 0;
-}
-
-static void stmfts_input_close(struct input_dev *dev)
-{
-	struct stmfts_data *sdata = input_get_drvdata(dev);
-	int err;
-
-	err = venus_fts_write(sdata, STMFTS_MS_MT_SENSE_OFF);
-	if (err)
-		dev_warn(sdata->dev,
-			 "failed to disable touchscreen: %d\n", err);
-
-	scoped_guard(mutex, &sdata->mutex) {
-		sdata->running = false;
-
-		if (sdata->hover_enabled) {
-			err = venus_fts_write(sdata, STMFTS_SS_HOVER_SENSE_OFF);
-			if (err)
-				dev_warn(sdata->dev,
-					 "failed to disable hover: %d\n", err);
-		}
-	}
-
-	if (sdata->use_key) {
-		err = venus_fts_write(sdata, STMFTS_MS_KEY_SENSE_OFF);
-		if (err)
-			dev_warn(sdata->dev,
-				 "failed to disable touchkey: %d\n", err);
-	}
-
-	pm_runtime_put_sync(sdata->dev);
-}
-
-static ssize_t stmfts_sysfs_chip_id(struct device *dev,
-				    struct device_attribute *attr, char *buf)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "%#x\n", sdata->chip_id);
-}
-
-static ssize_t stmfts_sysfs_chip_version(struct device *dev,
-					 struct device_attribute *attr,
-					 char *buf)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "%u\n", sdata->chip_ver);
-}
-
-static ssize_t stmfts_sysfs_fw_ver(struct device *dev,
-				   struct device_attribute *attr, char *buf)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "%u\n", sdata->fw_ver);
-}
-
-static ssize_t stmfts_sysfs_config_id(struct device *dev,
-				      struct device_attribute *attr, char *buf)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "%#x\n", sdata->config_id);
-}
-
-static ssize_t stmfts_sysfs_config_version(struct device *dev,
-					   struct device_attribute *attr,
-					   char *buf)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "%u\n", sdata->config_ver);
-}
-
-static ssize_t stmfts_sysfs_read_status(struct device *dev,
-					struct device_attribute *attr,
-					char *buf)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-	u8 status[4];
-	int err;
-
-	err = venus_fts_read_block(sdata, STMFTS_READ_STATUS,
-					    sizeof(status), status);
-	if (err)
-		return err;
-
-	return sysfs_emit(buf, "%#02x\n", status[0]);
-}
-
-static ssize_t stmfts_sysfs_hover_enable_read(struct device *dev,
-					      struct device_attribute *attr,
-					      char *buf)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	return sysfs_emit(buf, "%u\n", sdata->hover_enabled);
-}
-
-static ssize_t stmfts_sysfs_hover_enable_write(struct device *dev,
-					       struct device_attribute *attr,
-					       const char *buf, size_t len)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-	unsigned long value;
-	bool hover;
-	int err;
-
-	if (kstrtoul(buf, 0, &value))
-		return -EINVAL;
-
-	hover = !!value;
-
-	guard(mutex)(&sdata->mutex);
-
-	if (hover != sdata->hover_enabled) {
-		if (sdata->running) {
-			err = venus_fts_write(sdata, value ? STMFTS_SS_HOVER_SENSE_ON :
-							   STMFTS_SS_HOVER_SENSE_OFF);
-			if (err)
-				return err;
-		}
-
-		sdata->hover_enabled = hover;
-	}
-
-	return len;
-}
-
-static DEVICE_ATTR(chip_id, 0444, stmfts_sysfs_chip_id, NULL);
-static DEVICE_ATTR(chip_version, 0444, stmfts_sysfs_chip_version, NULL);
-static DEVICE_ATTR(fw_ver, 0444, stmfts_sysfs_fw_ver, NULL);
-static DEVICE_ATTR(config_id, 0444, stmfts_sysfs_config_id, NULL);
-static DEVICE_ATTR(config_version, 0444, stmfts_sysfs_config_version, NULL);
-static DEVICE_ATTR(status, 0444, stmfts_sysfs_read_status, NULL);
-static DEVICE_ATTR(hover_enable, 0644, stmfts_sysfs_hover_enable_read,
-					stmfts_sysfs_hover_enable_write);
-
-static struct attribute *stmfts_sysfs_attrs[] = {
-	&dev_attr_chip_id.attr,
-	&dev_attr_chip_version.attr,
-	&dev_attr_fw_ver.attr,
-	&dev_attr_config_id.attr,
-	&dev_attr_config_version.attr,
-	&dev_attr_status.attr,
-	&dev_attr_hover_enable.attr,
-	NULL
-};
-ATTRIBUTE_GROUPS(stmfts_sysfs);
-
-static int stmfts_read_system_info(struct stmfts_data *sdata)
-{
-	int err;
-	u8 reg[8];
-
-	err = venus_fts_read_block(sdata, STMFTS_READ_INFO,
-					    sizeof(reg), reg);
-	if (err < 0)
-		return err;
-	if (err != sizeof(reg))
-		return -EIO;
-
-	sdata->chip_id = be16_to_cpup((__be16 *)&reg[6]);
-	sdata->chip_ver = reg[0];
-	sdata->fw_ver = be16_to_cpup((__be16 *)&reg[2]);
-	sdata->config_id = reg[4];
-	sdata->config_ver = reg[5];
-
-	return 0;
-}
-
-
-/*
- * ST FTS 的 SPI 命令是「命令字节 + 大端地址」的帧，不是单字节。
- * 依据厂商 fts_lib（Evolution-X kernel_xiaomi_venus, fts_spi/fts_lib）：
- *   fts_writeReadU8UX(cmd, addrSize, address, out, len, hasDummyByte)
- *     finalCmd[0] = cmd; finalCmd[i+1] = address >> ((addrSize-1-i)*8) & 0xFF
- *     SPI: DUMMY_HW_REG/DUMMY_FIFO = 1 → 读 len+1 字节，丢掉第 0 字节
- *   芯片 ID: fts_writeReadU8UX(0xFA, ADDR_SIZE_HW_REG, 0x20000000, buf, 2, 1)
- *   期望值: DCHIP_ID_0 = 0x36, DCHIP_ID_1 ∈ {0x48, 0x50, 0x40, 0x39}
- */
-/*
- * 按厂商 fts_lib（Evolution-X kernel_xiaomi_venus, fts_spi/fts_lib）复刻的最小存活检测：
- *
- *   1) 上电时序（fts_chip_powercycle）：复位保持有效（物理低）→ 开 vdd → 1ms → 开 avdd
- *      → 5ms → 10ms → 释放复位（物理高）
- *   2) 复位脉冲（fts_system_reset 走 GPIO 分支）：拉低 10ms，拉高
- *   3) 读 FIFO 事件（pollForEvent）：命令 0x87 + 读 8 字节，SPI 下第一个字节是 dummy，
- *      事件首字节 0x03 = EVT_ID_CONTROLLER_READY
- *
- * 我们的 reset-gpios 是 GPIO_ACTIVE_LOW，所以 gpiod_set_value(1) = 物理低 = 复位有效。
- */
-#define FTS_EVT_CONTROLLER_READY	0x03
-#define FTS_FIFO_CMD_READONE		0x87
-#define FTS_FIFO_EVENT_SIZE		8
-
-static int venus_fts_read_event(struct stmfts_data *sdata, u8 *ev)
-{
-	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
-	struct spi_message msg;
-	u8 cmd = FTS_FIFO_CMD_READONE;
-	u8 rx[FTS_FIFO_EVENT_SIZE + 1] = { 0 };
-	int ret;
-
-	spi_message_init(&msg);
-	xfer[0].tx_buf = &cmd;
-	xfer[0].len = 1;
-	spi_message_add_tail(&xfer[0], &msg);
-	xfer[1].rx_buf = rx;
-	xfer[1].len = sizeof(rx);
-	xfer[1].delay.value = 10;
-	xfer[1].delay.unit = SPI_DELAY_UNIT_USECS;
-	spi_message_add_tail(&xfer[1], &msg);
-
-	ret = spi_sync(sdata->spi, &msg);
-	if (ret < 0)
-		return ret;
-
-	memcpy(ev, rx + 1, FTS_FIFO_EVENT_SIZE);	/* SPI 下第 0 字节是 dummy */
-	return 0;
-}
-
-static void venus_fts_read_hw_chipid(struct stmfts_data *sdata)
-{
-	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
-	struct spi_message msg;
-	u64 addr = 0x20000000ULL;	/* ADDR_DCHIP_ID */
-	u8 cmd[5];
-	u8 rx[3] = { 0 };
-	int i;
-
-	cmd[0] = 0xfa;			/* FTS_CMD_HW_REG_R */
-	for (i = 0; i < 4; i++)
-		cmd[i + 1] = (u8)((addr >> ((3 - i) * 8)) & 0xff);
-
-	spi_message_init(&msg);
-	xfer[0].tx_buf = cmd;
-	xfer[0].len = 5;
-	spi_message_add_tail(&xfer[0], &msg);
-	xfer[1].rx_buf = rx;
-	xfer[1].len = 3;		/* 2 字节 + dummy */
-	spi_message_add_tail(&xfer[1], &msg);
-
-	if (spi_sync(sdata->spi, &msg) == 0)
-		dev_info(sdata->dev,
-			 "venus-fts: 硬件 chip id 原始 [%*ph] → 0x%02x 0x%02x\n",
-			 3, rx, rx[1], rx[2]);
-}
-
-static bool venus_fts_probe_chipid(struct stmfts_data *sdata)
-{
-	u8 ev[FTS_FIFO_EVENT_SIZE];
-	int i;
-
-	/* 1) 上电时序 */
-	gpiod_set_value_cansleep(sdata->reset_gpio, 1);	/* 复位有效（物理低） */
-	regulator_disable(sdata->supplies[0].consumer);
-	regulator_disable(sdata->supplies[1].consumer);
-	msleep(20);
-	regulator_enable(sdata->supplies[0].consumer);	/* vdd */
-	msleep(2);
-	regulator_enable(sdata->supplies[1].consumer);	/* avdd */
-	msleep(6);
-	msleep(10);
-	gpiod_set_value_cansleep(sdata->reset_gpio, 0);	/* 释放复位（物理高） */
-	msleep(10);
-
-	/* 2) 复位脉冲 */
-	gpiod_set_value_cansleep(sdata->reset_gpio, 1);
-	msleep(12);
-	gpiod_set_value_cansleep(sdata->reset_gpio, 0);
-	msleep(5);
-
-	/* 3) 轮询 controller-ready 事件 */
-	for (i = 0; i < 200; i++) {
-		if (venus_fts_read_event(sdata, ev) < 0)
-			break;
-		if (ev[0] && ev[0] != 0xff) {
-			dev_info(sdata->dev,
-				 "venus-fts: 第 %d 次读到事件 [%*ph]%s\n", i,
-				 FTS_FIFO_EVENT_SIZE, ev,
-				 ev[0] == FTS_EVT_CONTROLLER_READY ? "  <<< 芯片就绪" : "");
-		}
-		if (ev[0] == FTS_EVT_CONTROLLER_READY) {
-			venus_fts_read_hw_chipid(sdata);
-			return true;
-		}
-		msleep(10);
-	}
-
-	dev_info(sdata->dev, "venus-fts: 200 次轮询没有 controller-ready\n");
-	return false;
-}
-
-static void stmfts_reset(struct stmfts_data *sdata)
-{
-	gpiod_set_value_cansleep(sdata->reset_gpio, 1);
-	msleep(20);
-
-	gpiod_set_value_cansleep(sdata->reset_gpio, 0);
-	msleep(50);
-}
-
-static int stmfts_configure(struct stmfts_data *sdata)
-{
-	int err;
-
-	err = stmfts_command(sdata, STMFTS_SYSTEM_RESET);
-	if (err)
-		return err;
-
-	err = stmfts_command(sdata, STMFTS_SLEEP_OUT);
-	if (err)
-		return err;
-
-	/* optional tuning */
-	err = stmfts_command(sdata, STMFTS_MS_CX_TUNING);
-	if (err)
-		dev_warn(sdata->dev,
-			 "failed to perform mutual auto tune: %d\n", err);
-
-	/* optional tuning */
-	err = stmfts_command(sdata, STMFTS_SS_CX_TUNING);
-	if (err)
-		dev_warn(sdata->dev,
-			 "failed to perform self auto tune: %d\n", err);
-
-	err = stmfts_command(sdata, STMFTS_FULL_FORCE_CALIBRATION);
-	if (err)
-		return err;
-
-	return 0;
-}
-
-static int stmfts_power_on(struct stmfts_data *sdata)
-{
-	int err, i;
-	u8 info[8] = { 0 };
-
-	/* 按厂商 fts_power_cycle 的顺序：先按住复位再上电，最后释放复位 */
-	if (sdata->reset_gpio)
-		gpiod_set_value_cansleep(sdata->reset_gpio, 1);
-
-	err = regulator_enable(sdata->supplies[0].consumer);	/* vdd */
-	dev_info(sdata->dev, "venus-fts: vdd enable rc=%d\n", err);
-	msleep(2);
-
-	err = regulator_enable(sdata->supplies[1].consumer);	/* avdd */
-	dev_info(sdata->dev, "venus-fts: avdd enable rc=%d\n", err);
-	msleep(6);
-
-	for (i = 0; i < sdata->num_supplies; i++)
-		dev_info(sdata->dev, "venus-fts: supply[%d] %s enabled=%d\n", i,
-			 sdata->supplies[i].supply,
-			 regulator_is_enabled(sdata->supplies[i].consumer));
-
-	msleep(10);
-	if (sdata->reset_gpio)
-		gpiod_set_value_cansleep(sdata->reset_gpio, 0);	/* 释放复位 */
-	msleep(100);
-	dev_info(sdata->dev, "venus-fts: 复位已释放，按厂商帧格式探测芯片 ID\n");
-	sdata->chip_ok = venus_fts_probe_chipid(sdata);
-
-	/* 全双工读：边发 0xFF 边收，若 MISO 与 MOSI 共线则能看出芯片是否在驱动 */
-	{
-		u8 t[17], r[17];
-		int k;
-
-		memset(t, 0xff, sizeof(t));
-		t[0] = STMFTS_READ_INFO;
-		memset(r, 0, sizeof(r));
-		spi_write_then_read(sdata->spi, NULL, 0, NULL, 0);	/* no-op */
-		{
-			struct spi_transfer x = { .tx_buf = t, .rx_buf = r, .len = 9 };
-			struct spi_message m;
-
-			spi_message_init(&m);
-			spi_message_add_tail(&x, &m);
-			spi_sync(sdata->spi, &m);
-		}
-		dev_info(sdata->dev, "venus-fts: 全双工读 0x80 -> [%*ph]\n", 9, r);
-		for (k = 0; k < 9; k++)
-			t[k] = 0xff;
-	}
-
-	/* 总线自检：换几个命令码看首字节是否跟着变，判断是回显还是芯片应答 */
-	{
-		static const u8 probe_cmds[] = { 0x84, 0xa8, 0x55, 0xaa };
-		int k;
-
-		for (k = 0; k < ARRAY_SIZE(probe_cmds); k++) {
-			u8 raw[9] = { 0 };
-
-			venus_fts_read_block(sdata, probe_cmds[k], 8, raw);
-			dev_info(sdata->dev, "venus-fts: 总线自检 cmd=0x%02x 首字节=0x%02x\n",
-				 probe_cmds[k], raw[0]);
-		}
-	}
-
-	err = venus_fts_read_block(sdata, STMFTS_READ_INFO, 8, info);
-	dev_info(sdata->dev, "venus-fts: info rc=%d [%02x %02x %02x %02x %02x %02x %02x %02x]\n",
-		 err, info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7]);
-	if (err < 0)
-		return err;
-
-	sdata->chip_id = be16_to_cpup((__be16 *)&info[6]);
-	sdata->chip_ver = info[0];
-	sdata->fw_ver = be16_to_cpup((__be16 *)&info[2]);
-	sdata->config_id = info[4];
-	sdata->config_ver = info[5];
-	dev_info(sdata->dev, "venus-fts: chip_id=0x%04x ver=0x%02x fw=0x%04x cfg=0x%02x/%02x\n",
-		 sdata->chip_id, sdata->chip_ver, sdata->fw_ver,
-		 sdata->config_id, sdata->config_ver);
-
-	enable_irq(sdata->irq);
-	msleep(50);
-
-	return 0;
-}
-
-static void stmfts_power_off(void *data)
-{
-	struct stmfts_data *sdata = data;
-
-	disable_irq(sdata->irq);
-
-	if (sdata->reset_gpio)
-		gpiod_set_value_cansleep(sdata->reset_gpio, 1);
-
-	regulator_bulk_disable(ARRAY_SIZE(stmfts_supplies), sdata->supplies);
-}
-
-static int stmfts_enable_led(struct stmfts_data *sdata)
-{
-	int err;
-
-	/* get the regulator for powering the leds on */
-	sdata->ledvdd = devm_regulator_get(sdata->dev, "ledvdd");
-	if (IS_ERR(sdata->ledvdd))
-		return PTR_ERR(sdata->ledvdd);
-
-	sdata->led_cdev.name = STMFTS_DEV_NAME;
-	sdata->led_cdev.max_brightness = LED_ON;
-	sdata->led_cdev.brightness = LED_OFF;
-	sdata->led_cdev.brightness_set_blocking = stmfts_brightness_set;
-	sdata->led_cdev.brightness_get = stmfts_brightness_get;
-
-	err = devm_led_classdev_register(sdata->dev, &sdata->led_cdev);
-	if (err) {
-		devm_regulator_put(sdata->ledvdd);
-		return err;
-	}
-
-	return 0;
-}
+/* ---------- probe / remove ---------- */
 
 static int venus_fts_probe(struct spi_device *spi)
 {
+	static const char * const supply_names[] = { "vdd", "avdd" };
+	struct venus_fts *ts;
 	struct device *dev = &spi->dev;
-	int err;
-	struct stmfts_data *sdata;
+	int ret;
 
-
-	sdata = devm_kzalloc(dev, sizeof(*sdata), GFP_KERNEL);
-	if (!sdata)
+	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
+	if (!ts)
 		return -ENOMEM;
 
-	spi_set_drvdata(spi, sdata);
+	ts->spi = spi;
+	ts->dev = dev;
+	ts->x_max = 1439;
+	ts->y_max = 3199;
+	mutex_init(&ts->lock);
 
-	sdata->spi = spi;
-	sdata->dev = dev;
-	sdata->irq = spi->irq;
-	mutex_init(&sdata->mutex);
-	init_completion(&sdata->cmd_done);
+	ts->num_supplies = ARRAY_SIZE(supply_names);
+	ts->supplies = devm_kcalloc(dev, ts->num_supplies,
+				    sizeof(*ts->supplies), GFP_KERNEL);
+	if (!ts->supplies)
+		return -ENOMEM;
+	for (ret = 0; ret < ts->num_supplies; ret++)
+		ts->supplies[ret].supply = supply_names[ret];
 
-	sdata->num_supplies = ARRAY_SIZE(stmfts_supplies);
-	err = devm_regulator_bulk_get_const(dev, sdata->num_supplies,
-					    stmfts_supplies,
-					    &sdata->supplies);
-	if (err)
-		return err;
+	ret = devm_regulator_bulk_get(dev, ts->num_supplies, ts->supplies);
+	if (ret)
+		return dev_err_probe(dev, ret, "取触摸电源失败\n");
 
-	sdata->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(sdata->reset_gpio))
-		return dev_err_probe(dev, PTR_ERR(sdata->reset_gpio),
-				     "Failed to get GPIO 'reset'\n");
+	ts->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(ts->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(ts->reset_gpio), "取 reset gpio 失败\n");
 
-	sdata->input = devm_input_allocate_device(dev);
-	if (!sdata->input)
+	ts->input = devm_input_allocate_device(dev);
+	if (!ts->input)
 		return -ENOMEM;
 
-	sdata->input->name = STMFTS_DEV_NAME;
-	sdata->input->id.bustype = BUS_I2C;
-	sdata->input->open = stmfts_input_open;
-	sdata->input->close = stmfts_input_close;
+	ts->input->name = "venus-fts-ts";
+	ts->input->id.bustype = BUS_SPI;
+	input_set_abs_params(ts->input, ABS_MT_POSITION_X, 0, ts->x_max, 0, 0);
+	input_set_abs_params(ts->input, ABS_MT_POSITION_Y, 0, ts->y_max, 0, 0);
+	input_set_abs_params(ts->input, ABS_MT_TOUCH_MAJOR, 0, 4095, 0, 0);
+	input_set_abs_params(ts->input, ABS_MT_TOUCH_MINOR, 0, 4095, 0, 0);
+	input_set_abs_params(ts->input, ABS_MT_ORIENTATION, -128, 127, 0, 0);
+	input_set_abs_params(ts->input, ABS_X, 0, ts->x_max, 0, 0);
+	input_set_abs_params(ts->input, ABS_Y, 0, ts->y_max, 0, 0);
+	input_set_abs_params(ts->input, ABS_DISTANCE, 0, 1, 0, 0);
+	input_set_capability(ts->input, EV_KEY, BTN_TOUCH);
 
-	input_set_capability(sdata->input, EV_ABS, ABS_MT_POSITION_X);
-	input_set_capability(sdata->input, EV_ABS, ABS_MT_POSITION_Y);
-	touchscreen_parse_properties(sdata->input, true, &sdata->prop);
+	ret = input_mt_init_slots(ts->input, FTS_MAX_FINGERS, INPUT_MT_DIRECT);
+	if (ret)
+		return ret;
 
-	input_set_abs_params(sdata->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_MT_TOUCH_MINOR, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_MT_ORIENTATION, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_MT_PRESSURE, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_DISTANCE, 0, 255, 0, 0);
+	spi_set_drvdata(spi, ts);
 
-	sdata->use_key = device_property_read_bool(dev, "touch-key-connected");
-	if (sdata->use_key) {
-		input_set_capability(sdata->input, EV_KEY, KEY_MENU);
-		input_set_capability(sdata->input, EV_KEY, KEY_BACK);
+	/* 中断先申请但不自动使能：芯片没起来时 INT 常低会造成中断风暴 */
+	ts->irq = spi->irq;
+	ret = devm_request_threaded_irq(dev, ts->irq, NULL, venus_fts_irq,
+					IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					"venus-fts", ts);
+	if (ret)
+		return dev_err_probe(dev, ret, "申请中断失败\n");
+
+	venus_fts_power_cycle(ts);
+
+	ret = venus_fts_wait_ready(ts);
+	if (ret) {
+		dev_err(dev, "venus-fts: 等不到 controller-ready，放弃注册中断\n");
+		return ret;
 	}
 
-	err = input_mt_init_slots(sdata->input,
-				  STMFTS_MAX_FINGERS, INPUT_MT_DIRECT);
-	if (err)
-		return err;
+	venus_fts_read_sysinfo(ts);
 
-	input_set_drvdata(sdata->input, sdata);
+	/* 厂商 fts_mode_handler 的 "Sense ON" 是 setScanMode(ACTIVE, 0x01)：
+	 * settings=0x01 才真正开启扫描，0x00 只是保持寄存器值 */
+	ret = venus_fts_set_scan(ts, FTS_SCAN_MODE_ACTIVE, 0x01);
+	if (ret) {
+		dev_err(dev, "venus-fts: 开扫描失败 %d\n", ret);
+		return ret;
+	}
+
+	ret = input_register_device(ts->input);
+	if (ret)
+		return ret;
+
+	mutex_lock(&ts->lock);
+	ts->ready = true;
+	mutex_unlock(&ts->lock);
+	enable_irq(ts->irq);
 
 	/*
-	 * stmfts_power_on expects interrupt to be disabled, but
-	 * at this point the device is still off and I do not trust
-	 * the status of the irq line that can generate some spurious
-	 * interrupts. To be on the safe side it's better to not enable
-	 * the interrupts during their request.
+	 * 正式版只走中断。轮询仅作调试手段（poll_ms>0 时启用），
+	 * 因为中断已验证可用（/proc/interrupts 计数随触摸增长）。
 	 */
-	dev_dbg(dev, "initializing ST-Microelectronics FTS...\n");
+	ts->log_budget = 0;
+	ts->poll_ms = 0;
+	INIT_DELAYED_WORK(&ts->poll_work, venus_fts_poll);
 
-	err = stmfts_power_on(sdata);
-	if (err)
-		return err;
-
-	if (!sdata->chip_ok) {
-		/*
-		 * 芯片 ID 都对不上就注册中断，会因 INT 引脚常低造成中断风暴
-		 * （之前把整机拖死过）。这里直接放弃注册中断。
-		 */
-		dev_err(dev, "venus-fts: 芯片 ID 不匹配，跳过中断与事件注册\n");
-		return -ENODEV;
-	}
-
-	err = devm_request_threaded_irq(dev, spi->irq,
-					NULL, stmfts_irq_handler,
-					IRQF_ONESHOT | IRQF_NO_AUTOEN,
-					"stmfts_irq", sdata);
-	if (err)
-		return err;
-
-	err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
-	if (err)
-		return err;
-
-	err = input_register_device(sdata->input);
-	if (err)
-		return err;
-
-	if (sdata->use_key) {
-		err = stmfts_enable_led(sdata);
-		if (err) {
-			/*
-			 * Even if the LEDs have failed to be initialized and
-			 * used in the driver, I can still use the device even
-			 * without LEDs. The ledvdd regulator pointer will be
-			 * used as a flag.
-			 */
-			dev_warn(dev, "unable to use touchkey leds\n");
-			sdata->ledvdd = NULL;
-		}
-	}
-
-	pm_runtime_enable(dev);
-	device_enable_async_suspend(dev);
-
+	dev_info(dev, "venus-fts: 触屏已启用（%s），中断驱动\n", ts->input->name);
 	return 0;
 }
 
 static void venus_fts_remove(struct spi_device *spi)
 {
-	pm_runtime_disable(&spi->dev);
+	struct venus_fts *ts = spi_get_drvdata(spi);
+
+	mutex_lock(&ts->lock);
+	ts->ready = false;
+	mutex_unlock(&ts->lock);
+
+	cancel_delayed_work_sync(&ts->poll_work);
+	disable_irq(ts->irq);
+	venus_fts_set_scan(ts, 0x01 /* LOW_POWER */, 0x00);
+	regulator_disable(ts->supplies[1].consumer);
+	regulator_disable(ts->supplies[0].consumer);
 }
-
-static int stmfts_runtime_suspend(struct device *dev)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-	int ret;
-
-	ret = venus_fts_write(sdata, STMFTS_SLEEP_IN);
-	if (ret)
-		dev_warn(dev, "failed to suspend device: %d\n", ret);
-
-	return ret;
-}
-
-static int stmfts_runtime_resume(struct device *dev)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	int ret;
-
-	ret = venus_fts_write(sdata, STMFTS_SLEEP_OUT);
-	if (ret)
-		dev_err(dev, "failed to resume device: %d\n", ret);
-
-	return ret;
-}
-
-static int stmfts_suspend(struct device *dev)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	stmfts_power_off(sdata);
-
-	return 0;
-}
-
-static int stmfts_resume(struct device *dev)
-{
-	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	return stmfts_power_on(sdata);
-}
-
-static const struct dev_pm_ops stmfts_pm_ops = {
-	SYSTEM_SLEEP_PM_OPS(stmfts_suspend, stmfts_resume)
-	RUNTIME_PM_OPS(stmfts_runtime_suspend, stmfts_runtime_resume, NULL)
-};
 
 static const struct of_device_id venus_fts_of_match[] = {
 	{ .compatible = "st,venus-fts" },
@@ -1039,17 +471,22 @@ static const struct of_device_id venus_fts_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, venus_fts_of_match);
 
+static const struct spi_device_id venus_fts_spi_id[] = {
+	{ "venus-fts", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(spi, venus_fts_spi_id);
+
 static struct spi_driver venus_fts_driver = {
 	.probe = venus_fts_probe,
 	.remove = venus_fts_remove,
+	.id_table = venus_fts_spi_id,
 	.driver = {
 		.name = "venus-fts-ts",
 		.of_match_table = venus_fts_of_match,
-		.pm = pm_ptr(&stmfts_pm_ops),
 	},
 };
 module_spi_driver(venus_fts_driver);
 
-MODULE_AUTHOR("Andi Shyti <andi.shyti@samsung.com>");
-MODULE_DESCRIPTION("STMicroelectronics FTS Touch Screen");
+MODULE_DESCRIPTION("ST FTS touchscreen for Xiaomi Mi 11 (venus), SPI");
 MODULE_LICENSE("GPL");

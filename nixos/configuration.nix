@@ -198,11 +198,23 @@ in
   };
   security.sudo.wheelNeedsPassword = false;
 
-  # 电源键：交给桌面处理（没有真正 suspend 支持，别让 logind 直接关机）
+  # ---------- 禁止一切休眠（已实测 system-25 上生效且系统正常）----------
+  # 这台机器 suspend 后 USB/串口/WiFi 全部消失，恢复后 ath11k 也不通流量，
+  # 表现为"设备失联、按一下电源键又回来"，所以把睡眠相关 target 直接屏蔽。
+  systemd.targets.sleep.enable = false;
+  systemd.targets.suspend.enable = false;
+  systemd.targets.hibernate.enable = false;
+  systemd.targets.hybrid-sleep.enable = false;
+  systemd.targets.suspend-then-hibernate.enable = false;
+
+  # 电源键/休眠键一律不理
   services.logind.extraConfig = ''
     HandlePowerKey=ignore
     HandlePowerKeyLongPress=ignore
     HandleLidSwitch=ignore
+    HandleSuspendKey=ignore
+    HandleHibernateKey=ignore
+    IdleAction=ignore
   '';
 
   # 关屏/亮屏：只改背光亮度（DCS 0x51），不动 CRTC，避免 DPMS 恢复不了
@@ -232,6 +244,34 @@ in
       B=/sys/class/backlight/ae94000.dsi.0/brightness
       [ -e "$B" ] || exit 0
       echo 128 > "$B" 2>/dev/null || true
+    '';
+  };
+
+
+  # ---------- 关闭 KDE 屏幕锁定 ----------
+  # 没有键盘/触屏解锁手段，一旦锁屏就只能靠重启；且 AMOLED 上黑屏会和"死机"混淆。
+  environment.etc."xdg/kscreenlockerrc".text = ''
+    [Daemon]
+    Autolock=false
+    LockOnResume=false
+    Timeout=0
+  '';
+
+  # ---------- 触屏启动服务 ----------
+  # spi-geni-qcom 必须先加载（否则 /sys/bus/spi/devices 里没有 spi1.0，触屏驱动不会被 probe），
+  # 再加载 fts-spi-venus（模块文件由 /root/ko 提供）。
+  systemd.services.venus-touch = {
+    description = "venus: 加载 SPI 与触屏驱动";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "venus-drm.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 60; };
+    script = ''
+      set -u
+      K=/root/ko
+      [ -d "$K" ] || exit 0
+      ${pkgs.kmod}/bin/insmod "$K/spi-geni-qcom.ko" 2>/dev/null || true
+      sleep 2
+      ${pkgs.kmod}/bin/insmod "$K/fts-spi-venus.ko" 2>/dev/null || true
     '';
   };
 

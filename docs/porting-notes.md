@@ -995,3 +995,38 @@ v110（触屏节点）一次性加了 `&spi11` 的 pinctrl 覆盖 + `ts_avdd` �
 - v112：只加 `touchscreen@0` 子节点（`vdd = L2C`、`avdd = L3C`）→ 系统正常，驱动绑定，读回全 0
 - v113：再加 `ts_avdd`（GPIO132 负载开关，`vin = L3C`），**不动 L3C 电压**→ 系统正常，读回仍全 0
 - 两次都没有出现 v110 那种"整机卡死"，说明 v110 的挂机是 `&vreg_l3c_3p0` 强制 3.3V 那一项（而不是触摸节点本身）
+
+### 2026-10-26 夜 · WiFi 断网事故（自己造成的）与修复
+
+现象：设备在线一段时间后 WiFi 完全不通（主机与手机双向 ARP 都是 `INCOMPLETE`，
+手机 ping 网关也不通），但屏幕/桌面/电源键休眠恢复都正常。
+先被怀疑是"休眠导致网卡没恢复"，**已排除**：
+
+```
+journalctl -b | grep -iE 'suspend|resume'   → 空（本次开机没有任何 suspend 事件）
+```
+
+真因：手动 `systemctl restart venus-wifi-power` 撞上脚本里的错误 sysfs 路径。
+
+```
+venus-wifi-power-start: line 29: /sys/bus/platform/devices/regulator-wlan_en_ctl/state: No such file or directory
+venus-wifi-power.service: start operation timed out. Terminating.
+ath11k_pci 0000:01:00.0: link down error during global reset
+qcom-pcie 1c00000.pcie: Device not found        ← 之后每次重训端点都不 link
+```
+
+设备上真实节点名是 `regulator-wlan-en-ctl`（连字符），脚本写成 `regulator-wlan_en_ctl`（下划线）。
+该分支只在"链路没通、拨 wlan_en 重试"时执行，所以正常开机不会暴露；手动 restart 时
+先 unbind PCIe，然后在错误路径失败、被超时 kill，于是 PCIe 停在未绑定、ath11k 卡死在 reset 态。
+之后即使完整断电重上电 + unbind/bind 也救不回来，**只有重启才能恢复**。
+
+修复（已进仓库，`nixos-rebuild boot` 生成，下次开机生效）：
+
+1. `regulator-wlan_en_ctl` → `regulator-wlan-en-ctl`
+2. `TimeoutStartSec` 180 → 300（开机那次实测会超过 180s）
+3. 脚本末尾加自检：若没有 `wlan0` 就重新 `bind` PCIe 并打印 `ip addr`，不再留未绑定状态
+
+教训：
+- 改 WiFi 相关的**运行时**服务前，先 `grep` 脚本里所有 sysfs 路径是否存在；
+- `venus-wifi-power` 这类"先 unbind 硬件再操作"的 oneshot 服务，失败时会把设备留在半残状态，
+  比不执行更糟 —— 所以它的每一步都要能兜底。

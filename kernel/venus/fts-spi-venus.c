@@ -83,6 +83,7 @@ struct stmfts_data {
 	int num_supplies;
 	struct input_dev *input;
 	struct gpio_desc *reset_gpio;
+	bool chip_ok;		/* 芯片 ID 探测是否通过 */
 	struct led_classdev led_cdev;
 	struct mutex mutex;
 
@@ -576,6 +577,90 @@ static int stmfts_read_system_info(struct stmfts_data *sdata)
 	return 0;
 }
 
+
+/*
+ * ST FTS 的 SPI 命令是「命令字节 + 大端地址」的帧，不是单字节。
+ * 依据厂商 fts_lib（Evolution-X kernel_xiaomi_venus, fts_spi/fts_lib）：
+ *   fts_writeReadU8UX(cmd, addrSize, address, out, len, hasDummyByte)
+ *     finalCmd[0] = cmd; finalCmd[i+1] = address >> ((addrSize-1-i)*8) & 0xFF
+ *     SPI: DUMMY_HW_REG/DUMMY_FIFO = 1 → 读 len+1 字节，丢掉第 0 字节
+ *   芯片 ID: fts_writeReadU8UX(0xFA, ADDR_SIZE_HW_REG, 0x20000000, buf, 2, 1)
+ *   期望值: DCHIP_ID_0 = 0x36, DCHIP_ID_1 ∈ {0x48, 0x50, 0x40, 0x39}
+ */
+static int venus_fts_read_id_once(struct stmfts_data *sdata)
+{
+	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
+	struct spi_message msg;
+	u64 addr = 0x20000000ULL;
+	u8 cmd[5];
+	u8 rx[4] = { 0 };
+	int i, ret;
+
+	cmd[0] = 0xfa;
+	for (i = 0; i < 4; i++)
+		cmd[i + 1] = (u8)((addr >> ((3 - i) * 8)) & 0xff);
+
+	spi_message_init(&msg);
+	xfer[0].tx_buf = cmd;
+	xfer[0].len = 5;
+	spi_message_add_tail(&xfer[0], &msg);
+	xfer[1].rx_buf = rx;
+	xfer[1].len = 3;
+	spi_message_add_tail(&xfer[1], &msg);
+
+	ret = spi_sync(sdata->spi, &msg);
+	dev_info(sdata->dev, "venus-fts: ID读 ret=%d -> [%*ph]%s\n", ret, 3, rx,
+		 rx[1] == 0x36 ? "  <<< 命中 0x36" : "");
+	return rx[1];
+}
+
+/*
+ * 复位极性 / 上电顺序的不确定性：厂商 DT 里 reset-gpios 标志是 0x00（ACTIVE_HIGH），
+ * 而机器上的引脚名是 TP_RESET_N（物理低有效）。这里把两种极性、两种上电顺序都试一遍，
+ * 看芯片什么时候开始在 MISO 上应答。
+ */
+static bool venus_fts_probe_chipid(struct stmfts_data *sdata)
+{
+	int pol, order;
+	bool found = false;
+
+	for (pol = 0; pol < 2; pol++) {
+		for (order = 0; order < 2; order++) {
+			/* 按住复位 */
+			gpiod_set_value_cansleep(sdata->reset_gpio, !pol ? 1 : 0);
+			msleep(20);
+
+			/* 上电（保持按住复位） */
+			if (order == 0) {
+				regulator_enable(sdata->supplies[0].consumer);
+				msleep(2);
+				regulator_enable(sdata->supplies[1].consumer);
+				msleep(6);
+			}
+
+			/* 释放复位 */
+			gpiod_set_value_cansleep(sdata->reset_gpio, !pol ? 0 : 1);
+			msleep(60);
+
+			if (order == 1) {
+				regulator_enable(sdata->supplies[0].consumer);
+				msleep(2);
+				regulator_enable(sdata->supplies[1].consumer);
+				msleep(20);
+			}
+
+			if (venus_fts_read_id_once(sdata) == 0x36) {
+				found = true;
+				dev_info(sdata->dev,
+					 "venus-fts: 复位极性=%d 上电顺序=%d 命中\n",
+					 pol, order);
+			}
+		}
+	}
+
+	return found;
+}
+
 static void stmfts_reset(struct stmfts_data *sdata)
 {
 	gpiod_set_value_cansleep(sdata->reset_gpio, 1);
@@ -642,7 +727,8 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 	if (sdata->reset_gpio)
 		gpiod_set_value_cansleep(sdata->reset_gpio, 0);	/* 释放复位 */
 	msleep(100);
-	dev_info(sdata->dev, "venus-fts: 复位已释放，读 0x80\n");
+	dev_info(sdata->dev, "venus-fts: 复位已释放，按厂商帧格式探测芯片 ID\n");
+	sdata->chip_ok = venus_fts_probe_chipid(sdata);
 
 	/* 全双工读：边发 0xFF 边收，若 MISO 与 MOSI 共线则能看出芯片是否在驱动 */
 	{
@@ -807,16 +893,25 @@ static int venus_fts_probe(struct spi_device *spi)
 	 * interrupts. To be on the safe side it's better to not enable
 	 * the interrupts during their request.
 	 */
+	dev_dbg(dev, "initializing ST-Microelectronics FTS...\n");
+
+	err = stmfts_power_on(sdata);
+	if (err)
+		return err;
+
+	if (!sdata->chip_ok) {
+		/*
+		 * 芯片 ID 都对不上就注册中断，会因 INT 引脚常低造成中断风暴
+		 * （之前把整机拖死过）。这里直接放弃注册中断。
+		 */
+		dev_err(dev, "venus-fts: 芯片 ID 不匹配，跳过中断与事件注册\n");
+		return -ENODEV;
+	}
+
 	err = devm_request_threaded_irq(dev, spi->irq,
 					NULL, stmfts_irq_handler,
 					IRQF_ONESHOT | IRQF_NO_AUTOEN,
 					"stmfts_irq", sdata);
-	if (err)
-		return err;
-
-	dev_dbg(dev, "initializing ST-Microelectronics FTS...\n");
-
-	err = stmfts_power_on(sdata);
 	if (err)
 		return err;
 

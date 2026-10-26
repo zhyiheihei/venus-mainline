@@ -93,7 +93,7 @@ in
     description = "venus: WiFi 上电、重训 PCIe、连 WiFi 并配置地址";
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-udev-settle.service" "systemd-networkd.service" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 180; };
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 300; };
     script = ''
       set -u
       P=/sys/bus/platform/devices
@@ -118,9 +118,9 @@ in
         sleep 6
         [ -d /sys/class/net/wlan0 ] && break
         echo "第 $t 轮链路没通, 拨 wlan_en 后重试"
-        echo disabled > "$P/regulator-wlan_en_ctl/state" 2>/dev/null || true
+        echo disabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
         sleep 1
-        echo enabled > "$P/regulator-wlan_en_ctl/state" 2>/dev/null || true
+        echo enabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
         sleep 2
       done
 
@@ -158,6 +158,14 @@ in
         sleep 1; i=$((i+1))
       done
       ${config.systemd.package}/bin/systemctl restart sshd.service 2>/dev/null || true
+
+      # 7) 自检：没有 wlan0 说明链路/固件失败，至少把 PCIe 重新绑上，别留在未绑定状态
+      if [ ! -d /sys/class/net/wlan0 ]; then
+        echo "自检失败：wlan0 不存在，重新绑定 PCIe"
+        echo 1c00000.pcie > "$D/bind" 2>/dev/null || true
+        sleep 5
+      fi
+      ip -4 -o addr show wlan0 2>/dev/null || echo "警告：wlan0 没有地址"
     '';
   };
 
@@ -251,7 +259,7 @@ in
       sleep 5
       for m in qcom-pon qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus \
                drm_exec drm_gpuvm gpu-sched mdt_loader ubwc_config msm \
-               panel-xiaomi-venus-k2 spi-geni-qcom fts-spi-venus; do
+               panel-xiaomi-venus-k2; do
         ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || ${pkgs.kmod}/bin/insmod "$K/$m.ko" 2>/dev/null || true
       done
     '';

@@ -1030,3 +1030,18 @@ qcom-pcie 1c00000.pcie: Device not found        ← 之后每次重训端点都�
 - 改 WiFi 相关的**运行时**服务前，先 `grep` 脚本里所有 sysfs 路径是否存在；
 - `venus-wifi-power` 这类"先 unbind 硬件再操作"的 oneshot 服务，失败时会把设备留在半残状态，
   比不执行更糟 —— 所以它的每一步都要能兜底。
+
+### 稳定性验证（2026-10-26 夜，重启后）
+
+`nixos-rebuild boot` 生成新系统 → `echo b > /proc/sysrq-trigger` → 一次开机全自动恢复：
+
+```
+ping <LAN_PHONE_IP>           → 通（RTT 103-170ms）
+uptime 109s, plasmashell 1 个
+systemctl show venus-wifi-power → 脚本里 wlan-en-ctl 出现 2 次（新版本生效）
+curl https://cache.nixos.org/nix-cache-info → 200（外网通）
+```
+
+**注意**：`venus-wifi-power` 不要在运行时随手 `restart`。它会先 unbind PCIe，
+中途失败就把无线留在半残状态（ath11k global reset 死态），只有重启能救。
+改动要么写进配置等下次开机，要么接受"失败就重启"。

@@ -1453,6 +1453,23 @@
 &slpi { status = "disabled"; };
 &ipa { status = "disabled"; };
 
+
+/*
+ * mdss 需要 "vsync" 时钟：dpu_encoder_phys_cmd_tearcheck_config() 里
+ *   vsync_hz = dpu_kms_get_clk_rate(dpu_kms, "vsync")
+ * 拿不到就 return（tearcheck 不使能）→ 命令模式面板的 read pointer 永不前进
+ * → PP_DONE 不来 → 只有 modeset 那一帧下发，屏幕停在纯色不刷新。
+ * 上游 sm8350.dtsi 的 mdss 时钟表里没有 vsync，但 dispcc（sm8250 同款）提供。
+ */
+&mdss {
+	clocks = <&dispcc DISP_CC_MDSS_AHB_CLK>,
+		 <&gcc GCC_DISP_HF_AXI_CLK>,
+		 <&gcc GCC_DISP_SF_AXI_CLK>,
+		 <&dispcc DISP_CC_MDSS_MDP_CLK>,
+		 <&dispcc DISP_CC_MDSS_VSYNC_CLK>;
+	clock-names = "iface", "bus", "nrt_bus", "core", "vsync";
+};
+
 &vreg_l3c_3p0 {
 	regulator-min-microvolt = <3300000>;
 	regulator-max-microvolt = <3300000>;

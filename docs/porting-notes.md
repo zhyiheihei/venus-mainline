@@ -778,3 +778,79 @@ systemd.services.venus-display = { ... };   # 开机按序 modprobe: qcom-refgen
 
 面板现状：DSI 报告 `connected`、mode 1440x3200、crtc enable=1、backlight 设备存在（255/255），
 但**屏幕全黑、背光不亮** —— 面板上电/初始化（DSC PPS + on 序列）还没在真机上验证成功，待续。
+
+## 2026-10-26 · 显示/触摸/桌面这一轮的实测结论（回退前留档）
+
+### 已证实可用（都有设备端输出为证）
+
+| 能力 | 证据 |
+|---|---|
+| 面板上电+初始化 | `venus-k2: PPS + 压缩模式 rc=0` / `on 序列 rc=0` / `读 power_mode rc=1 val=0x9c`（0x9c = 厂商 DTB 里的 `panel-status-value`） |
+| 背光 | `/sys/class/backlight/ae94000.dsi.0/` 存在，写 255 → 屏幕明显变亮 |
+| 面板 DCS 双向通信 | `读 DDB rc=3` 能回读 |
+| GPU | `adreno: loaded qcom/a660_gmu.bin`、`gpu-initialized:1`、turnip/freedreno 可用、`glmark2 Score 413 @1440x3200` |
+| 桌面合成 | sway + swaybg 起来，`grim` 抓到完整 1440x3200 帧（曾抓到 SWAY 壁纸，颜色正常） |
+| 按键 | `gpio-keys`(音量+) + `pmic_pwrkey`(电源) + `pmic_resin`(音量-)，PON 驱动需 `insmod qcom-pon.ko` |
+| 截图/取色 | `grim` + `magick -format %[pixel:p{x,y}]` |
+
+### 未解决：屏幕不刷新（唯一的真 blocker）
+
+现象：面板初始化成功、背光可调、CRTC `enable=1`、`grim` 能抓到白/灰/绿色帧，
+但**物理屏只显示 modeset 那一帧的纯色，之后不再刷新**（看不到文字、色块测试不变化）。
+
+机制（上游代码为证）：
+```
+drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c:381
+    vsync_hz = dpu_kms_get_clk_rate(dpu_kms, "vsync");
+    if (!vsync_hz) { DPU_DEBUG_CMDENC(...); return; }   ← 直接返回
+arch/arm64/boot/dts/qcom/sm8350.dtsi 的 mdss clocks 只有
+    iface / bus / nrt_bus / core —— 没有 "vsync"
+```
+→ `tearcheck` 永不使能 → 命令模式面板 read pointer 不前进 → `PP_DONE` 不来
+→ 每次 commit 卡在等这个中断 → 只有第一帧下来。
+
+试过的修法（都失败，别再重复）：
+
+| 尝试 | 结果 |
+|---|---|
+| 设备树加 `qcom,te-source = "mdp_intf0"` | 整机挂死（无 USB/串口/WiFi） |
+| 设备树给 mdss 加 `vsync` 时钟（`DISP_CC_MDSS_VSYNC_CLK`=44） | 整机挂死 |
+| 面板改视频模式 `VIDEO｜VIDEO_BURST` | `dsi_err_worker: status=4` = `DSI_ERR_STATE_FIFO`，面板不接受 |
+| 视频模式 + 关 DSC + 30Hz | `mipi_dsi_attach` 返回 `-ENOSPC`，attach 失败 |
+| 面板 `mode_flags = MIPI_DSI_MODE_LPM`（照抄上游 cmd+DSC 面板 panel-lg-sw43408） | 厂商序列失效，`power_mode` 读回 `0x00`（面板根本没醒） |
+| msm 里 tearcheck 拿不到 vsync 时钟时用 19.2MHz 兜底 | 已编译进 msm.ko，**未及验证**（用户决定回退） |
+
+厂商侧事实（供后续参考）：Android 运行时 DTB 里
+`qcom,mdss-dsi-te-pin-select = <0x01>`（TE 走 DSI 包回传，不是外部 GPIO）、
+`te-dcs-command/te-check-enable/te-using-te-pin` 都开着。
+
+### 未解决：触摸
+
+`/dev/input/event*` 注册成功、驱动 probe 通过、两路电 `enabled=1`，
+但读 `0x80` 等信息返回全 0；用 libgpiod 位操作（绕过 geni 控制器直接驱动 CS/CLK/MOSI/MISO）
+读 `0x80/0x84/0xA8` 同样全 0 → **芯片没有应答，仍未真正上电/复位**。
+注意：geni 读到的"回显"（`rx[n]==tx[n-1]`）是控制器行为，不是芯片行为。
+工具：`/root/bitbang.c`（设备上已编译）。
+
+### 这一轮踩到并已定论的坑（重要）
+
+1. **`systemctl reboot` 在这台机器上不生效**（uptime 一直涨），必须 `echo b > /proc/sysrq-trigger`。
+   后果：我曾以为"改完重启验证了"，实际一直在跑旧模块，白烧数轮。
+2. **`tools/vpush.sh` 偶发推成 0 字节**，`insmod` 报 `Invalid parameters`。
+   每次推送后必须核对字节数。
+3. **背光映射是正向**：`值 = brightness*2047/255`，写 2047 = 最亮、写 0 = 关屏。
+   面板是 AMOLED 自发光，深色内容看起来就"像背光没亮"，别再据此判断故障。
+4. **`systemd-backlight@backlight:...` 会用保存值覆盖运行时亮度**（曾造成"闪白一下又黑"）。
+5. `nixos-rebuild switch` 会重启 `getty@tty1`，旧 sway 占着 DRM master → 新 sway 起不来、
+   只留孤儿 `swaybg/swayidle`（表现为黑屏）。处理：`pkill -f sway-unwrapped; pkill swaybg;
+   systemctl restart getty@tty1`。
+6. 该 nixpkgs 里**没有 `services.logind.settings`**，写它会令 rebuild 直接失败；
+   要用 `services.logind.extraConfig`（`HandlePowerKey=ignore`）。否则电源键=关机。
+7. `swayidle` 用 `dpms off` 关屏后无法正确恢复（花屏），改成只写背光 0。
+
+### 存档
+
+- git tag `screen-ok-v101`（屏幕首次正常出图时的源码状态）
+- `~/mi11-work/known-good/boot-screen-ok-v101.img`（对应启动镜像）
+- `~/mi11-work/known-good/ko-current.tgz`（当时的全部内核模块）
+- 可启动镜像：`venus-boot-v107-touch-pwr.img`（当前已知最稳）

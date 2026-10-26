@@ -165,6 +165,10 @@ static const u8 venus_k2_pps[128] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
+static bool video_mode;
+module_param(video_mode, bool, 0644);
+MODULE_PARM_DESC(video_mode, "1=视频模式（无 DSC，30Hz），用于验证刷新通路");
+
 static inline struct venus_k2 *to_venus_k2(struct drm_panel *panel)
 {
 	return container_of(panel, struct venus_k2, panel);
@@ -297,8 +301,10 @@ static int venus_k2_prepare(struct drm_panel *panel)
 	venus_k2_reset(ctx);
 	dev_info(dev, "venus-k2: reset 完成\n");
 
-	ret = venus_k2_send_pps(ctx);
-	dev_info(dev, "venus-k2: PPS + 压缩模式 rc=%d\n", ret);
+	if (!video_mode) {
+		ret = venus_k2_send_pps(ctx);
+		dev_info(dev, "venus-k2: PPS + 压缩模式 rc=%d\n", ret);
+	}
 	ret = venus_k2_on(ctx);
 	dev_info(dev, "venus-k2: on 序列 rc=%d\n", ret);
 	if (ret < 0) {
@@ -347,12 +353,28 @@ static const struct drm_display_mode venus_k2_mode = {
 	.height_mm = 156,
 };
 
+/* 视频模式（无 DSC）用的 30Hz 模式，pclk 落在 4 lane 可承受范围 */
+static const struct drm_display_mode venus_k2_mode_30 = {
+	.clock = (1440 + 32 + 32 + 32) * (3200 + 32 + 24 + 24) * 30 / 1000,
+	.hdisplay = 1440,
+	.hsync_start = 1440 + 32,
+	.hsync_end = 1440 + 32 + 32,
+	.htotal = 1440 + 32 + 32 + 32,
+	.vdisplay = 3200,
+	.vsync_start = 3200 + 24,
+	.vsync_end = 3200 + 24 + 24,
+	.vtotal = 3200 + 24 + 24 + 32,
+	.width_mm = 70,
+	.height_mm = 156,
+};
+
 static int venus_k2_get_modes(struct drm_panel *panel,
 			      struct drm_connector *connector)
 {
 	struct drm_display_mode *mode;
 
-	mode = drm_mode_duplicate(connector->dev, &venus_k2_mode);
+	mode = drm_mode_duplicate(connector->dev,
+				  video_mode ? &venus_k2_mode_30 : &venus_k2_mode);
 	if (!mode)
 		return -ENOMEM;
 
@@ -442,8 +464,12 @@ static int venus_k2_probe(struct mipi_dsi_device *dsi)
 	 * （dsi_err_worker: status=4 = DSI_ERR_STATE_FIFO），面板不接受视频流，
 	 * 所以必须保持命令模式。
 	 */
-	/* 命令模式：LPM 会让厂商序列失效（power_mode 读回 0x00），故不用 LPM */
-	dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET | MIPI_DSI_CLOCK_NON_CONTINUOUS;
+	if (video_mode)
+		dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
+				  MIPI_DSI_MODE_NO_EOT_PACKET;
+	else
+		dsi->mode_flags = MIPI_DSI_MODE_NO_EOT_PACKET |
+				  MIPI_DSI_CLOCK_NON_CONTINUOUS;
 
 	ctx->panel.prepare_prev_first = true;
 	ctx->panel.backlight = venus_k2_create_backlight(dsi);
@@ -457,7 +483,8 @@ static int venus_k2_probe(struct mipi_dsi_device *dsi)
 	drm_panel_add(&ctx->panel);
 
 	/* 面板只支持 DSC：参数取自厂商 DTB（10bpc / 8bpp / slice 720x50） */
-	dsi->dsc = &ctx->dsc;
+	if (!video_mode)
+		dsi->dsc = &ctx->dsc;
 	ctx->dsc.dsc_version_major = 1;
 	ctx->dsc.dsc_version_minor = 1;
 	ctx->dsc.pic_width = 1440;

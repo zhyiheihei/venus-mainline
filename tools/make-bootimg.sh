@@ -56,12 +56,27 @@ mkdir -p /sys/kernel/config /dev/pts
 mount -t configfs none /sys/kernel/config 2>/dev/null
 mount -t devpts devpts /dev/pts 2>/dev/null
 
-# 早期 KMS：模块已随 initrd 一起进来（/lib/modules/7.2.6），这里直接加载，
-# 让面板在几秒内点亮、fbcon 接管，屏幕上随即开始刷内核日志。
+# 早期 KMS：先解绑 fbcon，再加载显示模块，最后重新绑定。
+# 直接让 fbcon 在 msm probe 期间绘制会死锁（fbdev 的 deferred-IO 提交要等 TE，
+# 而我们的 TE 是 19.2MHz 伪造节奏），实测整机卡死、USB 都不枚举。
+fbcon_unbind() {
+  for v in /sys/class/vtconsole/vtcon*; do
+    case "\$(cat \$v/name 2>/dev/null)" in *frame\ buffer*) echo 0 > "\$v/bind" 2>/dev/null ;; esac
+  done
+}
+fbcon_rebind() {
+  for v in /sys/class/vtconsole/vtcon*; do
+    case "\$(cat \$v/name 2>/dev/null)" in *frame\ buffer*) echo 1 > "\$v/bind" 2>/dev/null ;; esac
+  done
+}
+
+fbcon_unbind
 for m in qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus drm_exec \
          drm_gpuvm gpu-sched mdt_loader ubwc_config msm panel-xiaomi-venus-k2; do
   modprobe "\$m" 2>/dev/null || true
 done
+sleep 1
+fbcon_rebind
 
 UDC=\$(ls /sys/class/udc 2>/dev/null | head -1)
 if [ -n "\$UDC" ]; then

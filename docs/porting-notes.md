@@ -1209,3 +1209,29 @@ systemd-analyze
 
 修法（与 Ubuntu 等发行版一致）：cmdline 里同时给 **`console=tty0`**（屏幕）和
 `console=ttyGS0`（串口调试）。这样从 2.5s 起内核日志就在屏幕上滚动。
+
+### 修好"开机黑屏 1 分钟"：fbcon 必须在 msm probe 之后再绑定
+
+上一版直接把 `console=tty0` 加进 cmdline，结果**整机卡死**（USB 都不枚举，只能按键进 fastboot）。
+原因：`console=tty0` 让 printk 在 **msm 正在 probe 时**就送进 fbcon，fbcon 随即对 msm 的
+framebuffer 发起绘制；msm 的 fbdev 是 deferred-IO，每次绘制触发一次 atomic commit，
+而我们命令模式面板的 vsync 是 19.2MHz 伪造节奏，commit 要等一个不存在的 TE → probe 早期锁死。
+
+修法（在 initrd 的 preinit 里，顺序不能变）：
+
+```
+1. 解绑 fbcon（vtcon* 里 name 含 "frame buffer" 的 bind=0）
+2. modprobe 显示链路的 11 个模块（面板上电、msm 完成 probe）
+3. sleep 1 后再重新绑定 fbcon（bind=1）
+```
+
+实测启动序列（v131）：
+
+```
+[0.308] Console: switching to colour frame buffer device 90x100   ← simpledrm（splash fb）
+[1.969] Console: switching to colour dummy device 80x25            ← 解绑 fbcon
+[2.430] venus-k2: on 序列 rc=0                                      ← 面板点亮
+[2.467] Console: switching to colour frame buffer device 90x100    ← 重新绑定 fbcon
+```
+
+开机后一切正常：desktop 在、0 个 failed unit、vtcon1 bind=1。

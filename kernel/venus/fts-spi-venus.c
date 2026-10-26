@@ -587,6 +587,62 @@ static int stmfts_read_system_info(struct stmfts_data *sdata)
  *   芯片 ID: fts_writeReadU8UX(0xFA, ADDR_SIZE_HW_REG, 0x20000000, buf, 2, 1)
  *   期望值: DCHIP_ID_0 = 0x36, DCHIP_ID_1 ∈ {0x48, 0x50, 0x40, 0x39}
  */
+/* 厂商协议：通用「命令帧 + 读」；SPI 下第一个读字节是 dummy，要丢掉 */
+static int venus_fts_wr(struct stmfts_data *sdata, const u8 *tx, int txlen,
+			u8 *rx, int rxlen)
+{
+	struct spi_transfer xfer[2] = { { 0 }, { 0 } };
+	struct spi_message msg;
+	int ret;
+
+	spi_message_init(&msg);
+	xfer[0].tx_buf = tx;
+	xfer[0].len = txlen;
+	spi_message_add_tail(&xfer[0], &msg);
+
+	if (rx && rxlen) {
+		xfer[1].rx_buf = rx;
+		xfer[1].len = rxlen + 1;	/* dummy + 数据 */
+		xfer[1].delay.value = 10;
+		xfer[1].delay.unit = SPI_DELAY_UNIT_USECS;
+		spi_message_add_tail(&xfer[1], &msg);
+	}
+
+	ret = spi_sync(sdata->spi, &msg);
+	if (ret < 0)
+		return ret;
+
+	if (rx && rxlen)
+		memmove(rx, rx + 1, rxlen);
+
+	return 0;
+}
+
+/* readSysInfo：先 writeSysCmd(0x06,{0x01}) 载入，再读 208 字节 framebuffer */
+static void venus_fts_read_sysinfo(struct stmfts_data *sdata)
+{
+	static u8 sysinfo[208];
+	u8 load[3] = { 0xa4, 0x06, 0x01 };	/* FTS_CMD_SYSTEM, SYS_CMD_LOAD_DATA, LOAD_SYS_INFO */
+	u8 rd[3] = { 0xa7, 0x00, 0x00 };	/* FTS_CMD_FRAMEBUFFER_R, addr 16bit = 0 */
+	int ret;
+
+	ret = venus_fts_wr(sdata, load, sizeof(load), NULL, 0);
+	dev_info(sdata->dev, "venus-fts: 载入 sysinfo rc=%d\n", ret);
+	msleep(20);
+
+	ret = venus_fts_wr(sdata, rd, sizeof(rd), sysinfo, sizeof(sysinfo));
+	dev_info(sdata->dev, "venus-fts: 读 sysinfo rc=%d 前16字节 [%*ph]\n",
+		 ret, 16, sysinfo);
+}
+
+/* setScanMode(SCAN_MODE_ACTIVE, 0) = {0xA0, 0x00, 0x00} */
+static int venus_fts_set_scan(struct stmfts_data *sdata, u8 mode, u8 settings)
+{
+	u8 cmd[3] = { 0xa0, mode, settings };
+
+	return venus_fts_wr(sdata, cmd, sizeof(cmd), NULL, 0);
+}
+
 /*
  * 按厂商 fts_lib（Evolution-X kernel_xiaomi_venus, fts_spi/fts_lib）复刻的最小存活检测：
  *
@@ -691,6 +747,9 @@ static bool venus_fts_probe_chipid(struct stmfts_data *sdata)
 		}
 		if (ev[0] == FTS_EVT_CONTROLLER_READY) {
 			venus_fts_read_hw_chipid(sdata);
+			venus_fts_read_sysinfo(sdata);
+			dev_info(sdata->dev, "venus-fts: 开扫描 rc=%d\n",
+				 venus_fts_set_scan(sdata, 0x00, 0x00));
 			return true;
 		}
 		msleep(10);

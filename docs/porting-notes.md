@@ -1506,3 +1506,22 @@ clk 0x204，6.144MHz，固件对这条 SET_PARAM 直接回 -22）；路由用 nu
 
 下一步候选：核对 VA/VP 实际供电（厂商 DTB 无 supply 属性，我们的 s10b/vph_pwr 是推测）、
 cirrus,boost-type、以及功放 IRQ1_STATUS1 的 bit22 含义。
+
+## 2026-10-27 · TDM 位时钟 ABI 破解（关键进展）
+
+`AFE_MODULE_CLOCK_SET` 的参数头**不是** v3（param_hdr_v3 带 instance_id），
+而是 v1 形状：`u32 module_id / u32 param_id / u16 param_size / u16 reserved`，
+且 `clk_attri` 必须为 `Q6AFE_LPASS_CLK_ATTRIBUTE_INVERT_COUPLE_NO = 0x4`。
+
+在此之前试过并全部返回 -22（DSP EBADPARAM）：
+- mainline 自带的 v2 端口时钟（q6afe_port_set_param + afe_port_param_data_v2）
+- v3 头（module_id/instance_id/param_id/param_size）
+- clk_attri = 0
+
+改成 v1 头 + attri 0x4 后：`TDM port 0x9020 ibit clk 0x204 v3 rc=0`（成功）。
+
+### 另一个教训：音频实验后不要用 sysrq 重启
+
+两次都是 `echo b > /proc/sysrq-trigger` 之后设备完全静默（无 WiFi / 无 USB / 无串口），
+需要手动长按电源 + 音量下进 fastboot 才能恢复。改为 `systemctl reboot`（有序关停、
+让 ADSP/regulator 走正常电源顺序）后再验证。

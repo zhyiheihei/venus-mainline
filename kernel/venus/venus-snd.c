@@ -32,6 +32,8 @@ static int tdm_channels = 2;
 module_param(tdm_channels, int, 0644);
 static int tdm_mask = 0xF;
 module_param(tdm_mask, int, 0644);
+static int tdm_ibit_hz = 1536000;	/* 厂商 DT：qcom,msm-cpudai-tdm-clk-rate */
+module_param(tdm_ibit_hz, int, 0644);
 
 static int venus_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 				    struct snd_pcm_hw_params *params)
@@ -56,7 +58,7 @@ static int venus_be_startup(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
-	unsigned int bclk = VENUS_DEFAULT_RATE * tdm_slots * tdm_slot_width;
+	unsigned int bclk = tdm_ibit_hz;
 	int ret;
 
 	switch (cpu_dai->id) {
@@ -86,7 +88,7 @@ static int venus_be_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_component *comp;
-	unsigned int bclk = params_rate(params) * tdm_slots * tdm_slot_width;
+	unsigned int bclk = tdm_ibit_hz;
 	int i, ret;
 
 	/* TDM 槽位配置必须给 DSP：不给的话 AFE enable 会返回 -22（port 0x9020 无效参数） */

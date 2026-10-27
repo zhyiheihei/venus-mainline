@@ -1424,3 +1424,50 @@ dmesg: "remote processor adsp is now up"，无告警刷屏
 DT 里启用 adsp，但 cmdline 加 `modprobe.blacklist=qcom_q6v5_pas,pmic_glink,qcom_battmgr`
 → 开机不进 ADSP → 运行时 `modprobe` 逐个加载并观察。这样即使崩溃重启，设备也会
 自动回到同一个（不带 ADSP 的）镜像，不需要用户按 fastboot。
+
+## 2026-10-27 · 喇叭（CS35L41）进展：DSP 侧打通，卡在功放上电
+
+### 已解决：TERT TDM 端口被 DSP 拒绝（-22）
+
+主线的 Q6AFE 没有"TDM 组设备"概念，而本机 ADSP 固件要求**先配组再开端口**。
+移植厂商做法后（`q6afe.c` 新增 `q6afe_tdm_group_config()`）：
+
+```
+dmesg: TDM group 0x9120 cfg: ch=4 rate=48000 bw=32 slots=4 sw=32 mask=0xf
+dmesg: TDM group 0x9122 cfg: ch=4 ...
+（原来的 "AFE enable for port 0x9020 failed -22" 消失）
+```
+
+组参数取值来自厂商内核 `asoc/msm-dai-q6-v2.c` + `include/dsp/apr_audio-v2.h`：
+`AFE_MODULE_GROUP_DEVICE=0x00010254`、`AFE_PARAM_ID_GROUP_DEVICE_TDM_CONFIG=0x0001029E`、
+组 id = 端口 id + 0x100、`num_channels = nslots_per_frame`、`bit_width = slot_width`。
+
+### 新卡点：功放 PUP 超时
+
+```
+cs35l41 3-0042: Enable(1) failed: -110
+venus-snd sound: ASoC: PRE_PMU: SPK-R Main AMP event failed: -110
+```
+
+已排除的项（都读过实际状态）：
+
+```
+PWR_CTRL1(0x2014) = 0        功放从未真正上电
+reset gpio15 = out high      复位已释放（未压在复位里）
+VA = vreg_s10b_1p8 1800mV    已使能
+VP = vph_pwr 3700mV          已使能
+I2C 可读（DEVID 0x35a40）    芯片在线
+SP_FORMAT(0x4808) 已被配置    BE hw_params 跑到了
+```
+
+`cs35l41_global_enable()` 在 INT_BOOST 分支里轮询 IRQ1_STATUS1 的 PUP_DONE 位
+（100ms 超时）→ 超时。另外中断线一直是低电平有效（内核最后 Disabling IRQ #210），
+说明功放一直在报某个未清除的中断/保护状态。
+
+### 下一步候选（按证据强度排序）
+
+1. 核对功放供电脚：Android DTB 里 cs35l41 节点**没有任何 supply 属性**，我们的
+   `VA=vreg_s10b_1p8 / VP=vph_pwr` 是推测；若 VP 实际来自别的轨（如 SMB 的 boost），
+   PUP 期间会掉电 → 一直超时。
+2. 试 `cirrus,boost-type`（内部/外部/共享 boost）：厂商没写，但下游驱动默认值未必与主线一致。
+3. 把 `cirrus,gpio2-src-select` 按厂商改成 4（INT push-pull），排除 GPIO2 功能影响。

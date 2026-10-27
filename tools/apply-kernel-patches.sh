@@ -107,3 +107,29 @@ elif old in s:
 else:
     print("警告: 没找到待替换的 vsync_count 代码")
 PY
+
+# 7) qcom_battmgr: 小米 SM8350 固件对 TTF/TTE/MODEL_NAME 的应答与主线不符（超时或长度错），
+#    会让驱动每秒刷 dmesg。这三个属性对 venus 直接返回 -ENODATA。
+python3 - "$ksrc/drivers/power/supply/qcom_battmgr.c" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+anchor = "\tif (battmgr->variant == QCOM_BATTMGR_SC8280XP ||"
+add = """\t/*
+\t * venus (SM8350 小米固件)：TTF/TTE 请求要么超时(-110)、要么回 132 字节字符串；
+\t * MODEL_NAME 只回 12 字节整数。三者都会让驱动每秒打印 payload 长度错误，
+\t * 把 dmesg 刷满，所以直接返回 -ENODATA（上层只是不显示这些字段）。
+\t */
+\tif (battmgr->variant == QCOM_BATTMGR_SM8350 &&
+\t    (psp == POWER_SUPPLY_PROP_TIME_TO_FULL_AVG ||
+\t     psp == POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG ||
+\t     psp == POWER_SUPPLY_PROP_MODEL_NAME))
+\t\treturn -ENODATA;
+
+"""
+if 'TIME_TO_FULL_AVG ||' in s and 'venus (SM8350 小米固件)' in s:
+    print('battmgr 属性补丁已在位')
+elif anchor in s:
+    p.write_text(s.replace(anchor, add + anchor, 1)); print('battmgr 属性补丁已加')
+else:
+    print('警告: battmgr 补丁锚点没找到')
+PY

@@ -271,7 +271,7 @@
 };
 
 &adsp {
-	firmware-name = "qcom/sm8350/xiaomi/venus/adsp.mbn";
+	firmware-name = "qcom/sm8350/xiaomi/venus/adsp.mdt";
 	status = "okay";
 };
 
@@ -1471,7 +1471,6 @@
 };
 
 /* ---- 阶段2: 只保留 UFS/USB2/稳压器/tlmm/串口/屏幕日志, 其余逐步再开 ---- */
-&adsp { status = "disabled"; };
 &cdsp { status = "disabled"; };
 &mpss { status = "disabled"; };
 &slpi { status = "disabled"; };
@@ -1487,3 +1486,18 @@
 		serial1 = &uart18;
 	};
 };
+
+/*
+ * 电池/充电的官方通道：ADSP 上的 PMIC GLINK 服务。
+ * pmic_glink 会创建 aux 设备 "battmgr"，由 BATTERY_QCOM_BATTMGR 提供
+ * /sys/class/power_supply 里的电池与充电控制（对齐 sm8350-hdk）。
+ * 它需要 PDR 服务 "msm/adsp/charger_pd"，所以 ADSP remoteproc 必须先起来。
+ */
+/ {
+	pmic-glink {
+		compatible = "qcom,sm8350-pmic-glink", "qcom,pmic-glink";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	};
+};
+

@@ -33,5 +33,16 @@ if [ -d "$work/btfw" ]; then
   done
 fi
 
+
+# 4) ADSP 固件（电池/充电走 ADSP 上的 PMIC GLINK）
+# 来源：官方 ROM 的 modem 分区（FAT）image/adsp.mdt + adsp.b00..b25。
+# 主线 qcom_q6v5_pas 对 sm8350 期望 firmware-name = adsp.mdt（分段格式）。
+adsp_dir="$out/qcom/sm8350/xiaomi/venus"
+mkdir -p "$adsp_dir"
+if [ -d "$work/mdm/image" ]; then
+  cp "$work/mdm/image/adsp.mdt" "$adsp_dir/" 2>/dev/null || true
+  cp "$work"/mdm/image/adsp.b* "$adsp_dir/" 2>/dev/null || true
+fi
+
 echo "固件已就绪: $out"
 find "$out" -type f | sed "s|$out/||" | sort

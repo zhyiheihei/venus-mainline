@@ -1385,3 +1385,42 @@ DPU 自带的定时器/INTF 产生周期 vsync，本质上是"猜节奏"。要�
 - 遇到"触摸能点不能拖"先重启用户会话，不要先怀疑驱动；
 - `systemctl restart display-manager` 有时第一次会停在 SDDM greeter，再执行一次即可
   （本次第一轮还有 plasma-xdg-desktop-portal-kde 崩溃、plasma_waitforname 超时）。
+
+## 2026-10-27 · 电池/充电：ADSP + PMIC GLINK + battmgr 跑通（官方路径）
+
+### 结论
+
+```
+/sys/class/power_supply/qcom-battmgr-bat
+  capacity=100  status=Charging  voltage_now=4412000  current_now=104000
+  health=Good   present=1
+qcom-battmgr-usb: online=1  voltage_now=4962000  current_max=500000
+dmesg: "remote processor adsp is now up"，无告警刷屏
+```
+
+### 怎么做的（照 sm8350-hdk / sagami 的官方写法，没有任何自创驱动）
+
+1. **设备树**：`&adsp` 置 okay，`firmware-name = ".../adsp.mdt"`；
+   新增 `pmic-glink { compatible = "qcom,sm8350-pmic-glink","qcom,pmic-glink"; }`。
+   sm8350 的 PAS 资源本来就用 `adsp.mdt`（分段格式），不需要 `adsp_dtb.mdt`。
+2. **固件**：`dsp_a` 分区里只有 ADSP 的动态模块（.so/fastrpc shell），
+   **真正的 adsp 固件在 modem 分区（FAT）的 image/ 下**：`adsp.mdt` + `adsp.b00..b25`。
+   `tools/extract-firmware.sh` 已自动从这里取。
+3. **内核**：`QCOM_PMIC_GLINK=m`、`BATTERY_QCOM_BATTMGR=m`（其余依赖 RPMSG/GLINK_SMEM/PDR 本来就有）。
+4. **一次性坑**：DTS 里往根节点插 `pmic-glink` 必须放在属性之后（dtc: "Properties must
+   precede subnodes"），否则 `dtbs` 编译失败、而 make 的旧 dtb 还在，刷进去的是旧 DTB
+   （表现为"改了没反应"）。这次就是因此白刷了一轮。
+
+### 小米固件的协议差异（已打补丁）
+
+`BATT_MODEL_NAME(18)` 只回 12 字节整数、`BATT_TTF_AVG(19)` 回 132 字节字符串或直接超时，
+主线驱动按字符串/整数严格校验，导致每秒一条 `invalid payload length` 刷屏 +
+`time_to_full_avg: -110`。补丁：这三个属性在 SM8350 变体上直接返回 -ENODATA
+（`tools/apply-kernel-patches.sh` 第 7 条）。补丁后刷屏计数为 0。
+
+### 实验方法（值得复用）
+
+不在启动路径上直接开 ADSP（第一次这么干进了重启循环）。而是：
+DT 里启用 adsp，但 cmdline 加 `modprobe.blacklist=qcom_q6v5_pas,pmic_glink,qcom_battmgr`
+→ 开机不进 ADSP → 运行时 `modprobe` 逐个加载并观察。这样即使崩溃重启，设备也会
+自动回到同一个（不带 ADSP 的）镜像，不需要用户按 fastboot。

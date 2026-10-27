@@ -1328,3 +1328,34 @@ for g in system-*-link; do head -c 2 <target>/init | od -An -tx1; done
 建 USB ACM 串口 → 挂 /dev/sda34 到 /mnt-root → 打印 profiles → 起 busybox root shell。
 **这条通道不依赖设备上的任何系统**，串口在 COM4（不是 COM3——端口号会变，要用
 `[System.IO.Ports.SerialPort]::GetPortNames()` 现查）。
+
+## 2026-10-27 · 花屏（小块撕裂）：先减小假 vsync 的漂移，根治需要真 TE
+
+### 定量分析
+
+面板是命令模式（厂商 DT: `traffic-mode = "burst_mode"`、`te-pin-select = <1>`、
+`te-dcs-command = <1>`、`te-using-te-pin`），时序取自厂商 DTB：
+1440x3200@120，hfp/hbp/hpw=32，vbp=32/vfp=24/vpw=24 → htotal 1536、vtotal 3280。
+
+MDP 侧的 tearcheck 用 `DISP_CC_MDSS_VSYNC_CLK`（19.2MHz）：
+
+```
+vsync_count(上游截断) = 19200000 / (3280 * 120) = 48.78 → 48
+   → 假 vsync 频率 = 19200000/48/3280 = 121.95Hz   与面板 120Hz 差 +1.95%
+改四舍五入        = 49
+   → 119.46Hz                                      差 -0.45%
+```
+
+漂移减小到约 1/3.6，等效于"每秒撞上面板扫描的帧数"从约 2 帧降到约 0.5 帧。
+实测开机：面板 2.88s 点亮，`dsi_err`/`wait for commit` 计数 0，桌面正常。
+
+### 根治路径（尚未做）
+
+真 TE = 面板通过 DSI 回传的 tearing effect 信号。主线 `drivers/gpu/drm/msm/dsi/`
+里**完全没有** TE 支持（`dsi.xml` 的 `DSI_IRQ` 位域里也没有 TE 位），所以现在只能用
+DPU 自带的定时器/INTF 产生周期 vsync，本质上是"猜节奏"。要根治需要：
+
+1. DSI 侧：把面板 TE 包变成中断/事件，暴露给 DPU；
+2. DPU 侧：`qcom,te-source` 指向该事件源（`mdp_intfN` / `mdp_vsync_*`）。
+
+这也是"开机那一下花屏"（ABL 交棒 → 我们接管）无法消除的原因之一。

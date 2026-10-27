@@ -1471,3 +1471,38 @@ SP_FORMAT(0x4808) 已被配置    BE hw_params 跑到了
    PUP 期间会掉电 → 一直超时。
 2. 试 `cirrus,boost-type`（内部/外部/共享 boost）：厂商没写，但下游驱动默认值未必与主线一致。
 3. 把 `cirrus,gpio2-src-select` 按厂商改成 4（INT push-pull），排除 GPIO2 功能影响。
+
+## 2026-10-27 · 喇叭推进到 ASM/ADM 层；两个剩余卡点
+
+### 已解决
+
+1. AFE 端口 DEVICE_OPEN 的 -22：缺 TDM 组设备（group 0x9120）+ 端口 cfg 里
+   ctrl_data_out_enable / ctrl_invert_sync_pulse / ctrl_sync_data_delay 三项。
+   补齐后首次播放时端口能成功打开（dmesg 只剩 "TDM group 0x9120 cfg: ..."）。
+2. 功放中断风暴：interrupts 由 LEVEL_LOW 改 EDGE_FALLING + gpio2-src-select=4，
+   pm_runtime_resume_and_get failed in cs35l41_irq 从每分钟数百条降为 0。
+
+### 剩余卡点 A：DSP 不消费数据（立即 underrun + ASM 排队 EBUSY）
+
+  aplay: underrun!!! (at least 0.949 ms long)
+  aplay: pcm_write: write error: Device or resource busy
+  dmesg: q6asm-dai: Error queuing playback buffer -16
+  dmesg: qcom-q6afe: AFE close failed -22 / q6adm: Failed to close copp -22
+
+试过并全部无效：组参数 ch=4/rate=48000/bw=32/slots=4/sw=32/mask=0xf（与厂商一致）；
+BE 强制 1 声道或 2 声道；在组使能后补发 TDM 位时钟（AFE_MODULE_CLOCK_SET，
+clk 0x204，6.144MHz，固件对这条 SET_PARAM 直接回 -22）；路由用 numid 显式打开。
+
+关键行为：每次重启后的第一次播放能通过 AFE open；一旦失败，同一开机内再播放
+必然在 DEVICE_OPEN 就回 -22。DSP 侧状态不可复用，每次实验必须重启后只测一次。
+
+### 剩余卡点 B：CS35L41 上电不生效
+
+  直接经 i2ctransfer 写 PWR_CTRL1(GLOBAL_EN=1)：读回 1（写是成功的）
+  但 IRQ1_STATUS1 恒为 0x00400000，PUP_DONE(bit24) 永不置位
+  厂商内核的上电流程同样不轮询 PUP_DONE（置 GLOBAL_EN 后延时 1ms 返回）
+  已按此给主线打补丁（上电不等 PUP_DONE）
+  aplay 期间直读 PWR_CTRL1 仍为 0 → 功放实际没保持在已上电状态
+
+下一步候选：核对 VA/VP 实际供电（厂商 DTB 无 supply 属性，我们的 s10b/vph_pwr 是推测）、
+cirrus,boost-type、以及功放 IRQ1_STATUS1 的 bit22 含义。

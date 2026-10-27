@@ -209,6 +209,64 @@ in
     '';
   };
 
+
+  # ---------- 音频 bring-up 期：先关掉 PipeWire/WirePlumber 的自动探测 ----------
+  # 它们在会话启动时会打开 MultiMedia1 播放一段静音，此时路由还没配好，
+  # DSP 会拒绝并把 AFE/ASM 留在坏状态（dmesg: no backend DAIs enabled for MultiMedia1），
+  # 之后我们自己测试就一直在跟一个已经坏掉的 DSP 打交道。
+  systemd.user.services.pipewire.enable = lib.mkForce false;
+  systemd.user.services.pipewire-pulse.enable = lib.mkForce false;
+  systemd.user.services.wireplumber.enable = lib.mkForce false;
+
+  # 开机就把两条 BE 的 ADM 路由打开，避免任何客户端第一次播放就撞上"没 backend"
+  systemd.services.venus-audio-routing = {
+    description = "venus: 打开 TERT TDM RX0/RX1 到 MultiMedia1 的 ADM 路由";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "sound.target" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    script = ''
+      for i in $(seq 1 40); do
+        [ -e /proc/asound/card0 ] && break
+        sleep 1
+      done
+      ${pkgs.alsa-utils}/bin/amixer -c 0 cset name='TERT_TDM_RX_0 Audio Mixer MultiMedia1' 1 || true
+      ${pkgs.alsa-utils}/bin/amixer -c 0 cset name='TERT_TDM_RX_1 Audio Mixer MultiMedia1' 1 || true
+    '';
+  };
+
+
+  # ---------- 蓝牙保活 ----------
+  # 蓝牙和 WiFi 共用 PMIC 轨；venus-wifi-setup 重训 PCIe、或做音频实验时都会让
+  # BT_EN / 电源轨掉一次，控制器随之掉电、hci0 需要重新上电才回到 Powered:yes。
+  # 之前只有开机时上电一次，之后掉了就再也不恢复（实测 bluetoothctl 显示 Powered: no，
+  # 但 hci0 在、固件也重新下载过）。这里加一个保活循环：发现没上电就重新上电，
+  # hci0 彻底不见了就先给 BT_EN 一个电源周期。
+  systemd.services.venus-bt-keepalive = {
+    description = "venus: 蓝牙保活（掉电后自动重新上电）";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "bluetooth.service" ];
+    serviceConfig = { Type = "simple"; Restart = "always"; RestartSec = 10; };
+    script = ''
+      BT=${pkgs.bluez}/bin/bluetoothctl
+      while :; do
+        if [ -d /sys/class/bluetooth/hci0 ]; then
+          if $BT show 2>/dev/null | grep -q "Powered: yes"; then
+            sleep 15
+            continue
+          fi
+          $BT power on >/dev/null 2>&1 || true
+          sleep 5
+        else
+          # hci0 不在：给 BT_EN 一个干净的电源周期，等控制器回来
+          echo disabled > /sys/bus/platform/devices/regulator-bt-en-ctl/state 2>/dev/null || true
+          sleep 1
+          echo enabled > /sys/bus/platform/devices/regulator-bt-en-ctl/state 2>/dev/null || true
+          sleep 8
+        fi
+      done
+    '';
+  };
+
   # ---------- 桌面环境（KDE Plasma 6，与本机 NixOS 主机同款）----------
   # 本机主机跑的是 Plasma 6 + greetd(startplasma-wayland)，这里对齐同一套。
   # 选 Plasma 而不是 GNOME 的理由：本机同款，且 Wayland 会话不需要 Xorg。

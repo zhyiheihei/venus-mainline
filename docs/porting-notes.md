@@ -1235,3 +1235,39 @@ framebuffer 发起绘制；msm 的 fbdev 是 deferred-IO，每次绘制触发一
 ```
 
 开机后一切正常：desktop 在、0 个 failed unit、vtcon1 bind=1。
+
+## 2026-10-27 · 清掉自创补丁：上游本来就有 vsync 时钟
+
+用户判断对了：**很多"问题"是被我们自己的自创补丁制造出来的**。
+
+### 事实核对
+
+我一直以为 sm8350 的 mdss/mdp 没有 `vsync` 时钟，所以给
+`dpu_encoder_phys_cmd.c` 打了"取不到就用 19.2MHz 兜底"的补丁。实际情况：
+
+```
+arch/arm64/boot/dts/qcom/sm8350.dtsi 的 mdp 节点本来就有：
+    clocks = <...>, <&dispcc DISP_CC_MDSS_VSYNC_CLK>;
+    clock-names = "bus","nrt_bus","iface","lut","core","vsync";
+    assigned-clocks = <&dispcc DISP_CC_MDSS_VSYNC_CLK>;
+    assigned-clock-rates = <19200000>;
+```
+
+设备端实测：
+
+```
+cat /sys/kernel/debug/clk/disp_cc_mdss_vsync_clk/clk_rate   → 19200000
+dmesg | grep 'venus: no vsync'                              → 空（兜底分支从未执行）
+```
+
+也就是说：**这个补丁是死代码**，19.2MHz 本来就是官方 assigned-clock-rate。
+已删除补丁，恢复上游 `if (!vsync_hz) return;`。重新编译后（只影响 msm.ko，内核 Image 不变）
+开机验证：桌面正常、0 个 failed unit、`wait for commit`/`dsi_err` 计数为 0。
+
+### 顺带确认
+
+- `qcom,te-source = "timer0"` 是上游 DPU 认的取值（`dpu_kms.c` 的 `dpu_vsync_sources[]`），
+  DPU 内置 WD 定时器按帧率产生 vsync，不依赖面板 TE 引脚 —— 这是 venus 这种
+  "TE 走 DSI 回传、板上没接到 mdp_vsync 引脚"的机器唯一可用的周期 vsync 源。
+- `console=tty0` 在恢复上游 DPU 代码 + v129 形态 preinit 之后**可以正常开机**
+  （之前几次挂死是在"自创补丁 + sleep/解绑重绑"叠加的情况下发生的）。

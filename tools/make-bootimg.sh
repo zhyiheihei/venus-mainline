@@ -109,7 +109,7 @@ echo "== mkbootimg =="
 gzip -9 -c "$build/arch/arm64/boot/Image" > "$work/Image.gz"
 cat "$work/Image.gz" "$build/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb" > "$work/Image.gz-dtb"
 
-cmdline="console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init boot.shell_on_fail \
+cmdline="console=tty0 console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init boot.shell_on_fail \
 net.ifnames=0 loglevel=7 firmware_class.path=/run/current-system/firmware \
 regulator_ignore_unused pd_ignore_unused clk_ignore_unused $extra"
 

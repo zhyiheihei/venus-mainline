@@ -1310,6 +1310,19 @@
 
 	bluetooth {
 		compatible = "qcom,wcn6855-bt";
+
+		/* 厂商 DTB 实证：bt-reset-gpio = tlmm 65、bt-sw-ctrl-gpio = tlmm 153。
+		 * 这两个 GPIO 交给 hci_qca 自己控制（复位脉冲 + 读 SW_CTRL）；
+		 * 实测该组合下固件下载成功："QCA setup on UART is completed"。 */
+		enable-gpios = <&tlmm 65 GPIO_ACTIVE_HIGH>;
+		swctrl-gpios = <&tlmm 153 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * 芯片自报的 BD_ADDR 是全零（00:00:00:00:5A:AD），内核据此把设备标成
+		 * HCI_UNCONFIGURED → hciconfig up 直接 -EOPNOTSUPP，BlueZ 也看不到控制器。
+		 * 给一个固定的本地地址即可（格式是小端字节序）。
+		 */
+		local-bd-address = [5f 4d 3c 22 11 02];
 		/* 电源轨已由 venus-wifi-power 在运行时打开(wlan/bt 共用),
 		 * 这里挂一个 always-on 的 fixed 稳压器满足驱动的 bulk_get */
 		vddio-supply = <&bt_vreg>;
@@ -1455,4 +1468,13 @@
 &slpi { status = "disabled"; };
 &ipa { status = "disabled"; };
 
-
+/*
+ * qcom_geni_serial 需要 aliases 里的 serialN 才能拿到 line 号；
+ * 没有它 probe 报 "Invalid line -19"，UART 不注册，其下的 bluetooth 子节点
+ * （qcom,wcn6855-bt）也就不会生成 serdev → 没有 hci0。
+ */
+/ {
+	aliases {
+		serial1 = &uart18;
+	};
+};

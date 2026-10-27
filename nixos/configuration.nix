@@ -62,6 +62,14 @@ in
   # 暂时关掉 NixOS 防火墙；等把 NETFILTER 相关符号补齐再开。
   networking.firewall.enable = false;
 
+  # ---------- 蓝牙（BlueZ；芯片是 WCN6851，AT 固件在 nixos/firmware/qca/）----------
+  # BT UART 是 qupv3 SE18 (0x890000)，DTS 里已给它 alias 并挂了 bluetooth 子节点；
+  # 电源轨与 WiFi 共用，由 venus-wifi-setup 在运行时打开后再启动 bluetoothd。
+  hardware.bluetooth = {
+    enable = true;
+    powerOnBoot = false;   # 电源轨还没开时不能上电，交给 venus-wifi-setup 之后启动
+  };
+
   # ---------- SSH ----------
   services.openssh = {
     enable = true;
@@ -164,6 +172,14 @@ in
         sleep 5
       fi
       ip -4 -o addr show wlan0 2>/dev/null || echo "警告：wlan0 没有地址"
+
+      # 8) 蓝牙：电源轨（与 WiFi 共用）已开，现在才可以让 BlueZ 上电并下载固件
+      /run/current-system/sw/bin/rfkill unblock bluetooth 2>/dev/null || true
+      /run/current-system/sw/bin/systemctl start bluetooth.service 2>/dev/null || true
+      sleep 3
+      /run/current-system/sw/bin/hciconfig -a 2>/dev/null | head -6 || true
+      # 电源轨已就位，这时候才给控制器上电（BlueZ 才能把 adapter 暴露给桌面）
+      /run/current-system/sw/bin/bluetoothctl power on 2>&1 | tail -2 || true
     '';
   };
 

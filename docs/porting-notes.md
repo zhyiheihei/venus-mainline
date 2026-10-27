@@ -1525,3 +1525,27 @@ cirrus,boost-type、以及功放 IRQ1_STATUS1 的 bit22 含义。
 两次都是 `echo b > /proc/sysrq-trigger` 之后设备完全静默（无 WiFi / 无 USB / 无串口），
 需要手动长按电源 + 音量下进 fastboot 才能恢复。改为 `systemctl reboot`（有序关停、
 让 ADSP/regulator 走正常电源顺序）后再验证。
+
+## 2026-10-27 · 喇叭：功放终于会上电，但 DSP 不消费数据
+
+### 进展（有实测证据）
+
+1. 修掉"开机就有客户端播放"的干扰：关掉会话里的 pipewire / pipewire-pulse / wireplumber
+   自动探测（它们在 72s 就打开 MultiMedia1 试播，路由没配导致
+   "no backend DAIs enabled for MultiMedia1"，并把 DSP 留在坏状态），
+   新增 venus-audio-routing 在开机时先把两条 BE 的 ADM 路由打开。
+2. **功放 DAPM 链路通了**：播放期间直读寄存器
+   `3-0040 PWR_CTRL1=1`、`3-0042 PWR_CTRL1=1`、`SP_ENABLES(0x4800)=0x00010000`
+   （GLOBAL_EN 置位、ASPRX1 使能）。此前一直是 0。
+3. TDM 组配置 + 位时钟（v1 头 + clk_attri=0x4）稳定 rc=0，AFE 端口能打开。
+
+### 未解决：DSP 不消费数据（立即 underrun）
+
+aplay 播放期间反复 `underrun!!! (at least 0.8ms)`，DSP 侧没有任何报错。
+另外发现我自己引的一个坑：在 ack 里对 -EBUSY 做 2000×10us 忙等重试，
+在 DSP 不消费时会把这个 aplay 卡在内核里（状态 R、kill -9 无效，
+sysrq-t 栈显示 `__delay_cycles`）。已收敛为 ≤1ms 重试、失败就交给下一次 ack。
+
+下一步要查的：ADM copp 的 FE→BE 连接是否真的建立（FE 2ch/48k S16 与
+BE 4slots×32bit 的对应关系）、q6asm RUN 的应答、以及是否需要给 BE 配
+`qcom,tdm-slot-mapping`。

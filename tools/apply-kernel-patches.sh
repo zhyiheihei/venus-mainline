@@ -87,3 +87,23 @@ else:
 PY
 
 echo "完成。内核源码树: $ksrc"
+
+# 6) dpu_encoder_phys_cmd: tearcheck 的 vsync_count 用四舍五入（上游是截断）
+python3 - "$ksrc/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+old = "\ttc_cfg.vsync_count = vsync_hz /\n\t\t\t\t(mode->vtotal * drm_mode_vrefresh(mode));"
+new = ("\t/*\n"
+       "\t * venus: 四舍五入而不是截断。19.2MHz/(3280*120)=48.78，截断成 48 等于把假\n"
+       "\t * vsync 定在 121.95Hz（快 1.95%%），与面板 120Hz 漂移约每秒撕裂 2 帧；\n"
+       "\t * 取 49 → 119.46Hz（慢 0.45%%），漂移降到 1/3.6。\n"
+       "\t */\n"
+       "\ttc_cfg.vsync_count = DIV_ROUND_CLOSEST(vsync_hz,\n"
+       "\t\t\t\tmode->vtotal * drm_mode_vrefresh(mode));")
+if "DIV_ROUND_CLOSEST(vsync_hz," in s:
+    print("vsync_count 四舍五入已在位")
+elif old in s:
+    p.write_text(s.replace(old, new)); print("vsync_count 已改为四舍五入")
+else:
+    print("警告: 没找到待替换的 vsync_count 代码")
+PY

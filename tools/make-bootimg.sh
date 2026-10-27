@@ -100,17 +100,18 @@ fi
 
 exec $stage1
 EOS
-# 蓝牙固件必须放进 initrd：hci_qca 在 1.6s 就 probe 并请求 qca/hpbtfw10.tlv，
-# 那时 preinit 还没来得及把 firmware_class.path 指到 /run/current-system/firmware，
-# 结果就是 "Direct firmware load ... failed with error -2"。
-mkdir -p "$work/ird/lib/firmware/qca" 2>/dev/null || \
-  { rm -rf "$work/ird/lib"; mkdir -p "$work/ird/lib/firmware/qca"; }
-for f in hpbtfw10.tlv hpbtfw21.tlv; do
-  [ -f "$root/nixos/firmware/qca/$f" ] && cp "$root/nixos/firmware/qca/$f" "$work/ird/lib/firmware/qca/" || true
+# 蓝牙固件必须能"在 1.6s probe 时"取到：hci_qca 在设备打开时会立刻下载
+# qca/hpbtfw10.tlv，那时 preinit 还没跑、firmware_class.path 还没指向 /run/current-system。
+# 主线笔记本机型（sc8280xp 等）就是靠"固件在 initrd 里"满足这一点；我们照做，
+# 把固件放在 initrd 的 /venus-fw，并用 cmdline 的 firmware_class.path 指过去。
+rm -rf "$work/ird/venus-fw"; mkdir -p "$work/ird/venus-fw/qca"
+cp "$root"/nixos/firmware/qca/hpbtfw10.tlv "$root"/nixos/firmware/qca/hpbtfw21.tlv \
+   "$root/nixos/firmware/qca/hpnv10."* "$work/ird/venus-fw/qca/" 2>/dev/null || true
+# 驱动先试 wcn 前缀、再试 hp 前缀，两种命名都备一份
+for f in "$work/ird/venus-fw/qca/"hp*; do
+  b=$(basename "$f"); cp "$f" "$work/ird/venus-fw/qca/wcn$b" 2>/dev/null || true
 done
-for f in "$root"/nixos/firmware/qca/hpnv10.*; do
-  [ -f "$f" ] && cp "$f" "$work/ird/lib/firmware/qca/" || true
-done
+
 chmod +x "$work/ird/venus-preinit.sh"
 rm -f "$work/ird/init" 2>/dev/null || true; ln -s /venus-preinit.sh "$work/ird/init"
 ( cd "$work/ird" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9 > "$work/initrd.cpio.gz" )
@@ -120,7 +121,7 @@ echo "== mkbootimg =="
 gzip -9 -c "$build/arch/arm64/boot/Image" > "$work/Image.gz"
 cat "$work/Image.gz" "$build/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb" > "$work/Image.gz-dtb"
 
-cmdline="console=tty0 console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init boot.shell_on_fail \
+cmdline="firmware_class.path=/venus-fw console=tty0 console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init boot.shell_on_fail \
 net.ifnames=0 loglevel=7 firmware_class.path=/run/current-system/firmware \
 regulator_ignore_unused pd_ignore_unused clk_ignore_unused $extra"
 

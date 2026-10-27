@@ -30,37 +30,58 @@ in
 
   # ---------- 网络 ----------
   networking.hostName = "venus";
+  # WiFi 交给 NetworkManager：这样 Plasma 的网络面板（plasma-nm）才能列出/切换 WiFi。
+  # 硬件层（五路电源、PCIe 重训、固定 MAC）仍由 venus-wifi-setup 负责，
+  # 之后把 wlan0 交给 NM。systemd-networkd 不再管 wlan0。
   networking.useDHCP = false;
-  # 用 systemd-networkd + resolved 管理地址与 DNS
-  networking.useNetworkd = true;
-  # 关掉可预测网卡命名，保持 wlan0（脚本/wpa_supplicant 都按这个名字写的）
+  networking.useNetworkd = false;
   networking.usePredictableInterfaceNames = false;
   services.resolved.enable = true;
   networking.nameservers = [ wifiGw "223.5.5.5" ];
-  # wlan0 的地址/路由/DNS 交给 systemd-networkd（设备是运行后期才出现，networkd 支持热插）
-  systemd.network.networks."20-wlan0" = {
-    matchConfig.Name = "wlan0";
-    networkConfig = {
-      DHCP = "no";
-      DNS = [ wifiGw "223.5.5.5" ];
-    };
-    address = [ "${wifiIp}/24" ];
-    routes = [ { Destination = "0.0.0.0/0"; Gateway = wifiGw; } ];
-  };
-  networking.networkmanager.enable = false;
-  networking.wireless = {
+
+  networking.networkmanager = {
     enable = true;
-    userControlled.enable = false;
-    networks."<WIFI_SSID>" = { psk = "<WIFI_PASSWORD>"; };
+    # 设备是运行后期才出现的，别让 NM 因为"没网卡"就放弃
+    settings.main.no-auto-default = "*";
+    # 声明式保存一个连接：WPA + 静态地址，出现在 Plasma 的网络列表里
+    ensureProfiles.profiles.venus-wifi = {
+      connection = {
+        id = "<WIFI_SSID>";
+        type = "wifi";
+        interface-name = "wlan0";
+        autoconnect = true;
+        autoconnect-retries = 0;
+      };
+      wifi = {
+        ssid = "<WIFI_SSID>";
+        mode = "infrastructure";
+      };
+      wifi-security = {
+        key-mgmt = "wpa-psk";
+        psk = "<WIFI_PASSWORD>";
+      };
+      ipv4 = {
+        method = "manual";
+        address1 = "${wifiIp}/24,${wifiGw}";
+        dns = "223.5.5.5;${wifiGw};";
+        may-fail = false;
+      };
+      ipv6.method = "ignore";
+    };
   };
-  # wlan0 是运行后期才出现的，NixOS 的 network-addresses-wlan0 在开机时找不到设备，
-  # 地址由 venus-wifi-power 服务自己加。
-  systemd.services."network-addresses-wlan0".enable = false;
-  systemd.services."network-setup".enable = false;
+  # NM 自己不碰其它网卡
+  networking.networkmanager.unmanaged = [ "interface-name:lo" ];
 
   # TODO: 内核的 nftables/LOG 扩展还不完整（ip6tables 里 LOG 规则报 "No such file or directory"），
   # 暂时关掉 NixOS 防火墙；等把 NETFILTER 相关符号补齐再开。
   networking.firewall.enable = false;
+
+  # ---------- 下载代理（局域网 SOCKS5，直连 cache.nixos.org 极慢）----------
+  systemd.services.nix-daemon.environment = {
+    http_proxy = "socks5h://<LAN_PROXY_IP>:1080";
+    https_proxy = "socks5h://<LAN_PROXY_IP>:1080";
+    all_proxy = "socks5h://<LAN_PROXY_IP>:1080";
+  };
 
   # ---------- 蓝牙（BlueZ；芯片是 WCN6851，AT 固件在 nixos/firmware/qca/）----------
   # BT UART 是 qupv3 SE18 (0x890000)，DTS 里已给它 alias 并挂了 bluetooth 子节点；
@@ -155,10 +176,12 @@ in
       ${pkgs.iproute2}/bin/ip link set wlan0 address ${wifiMac} 2>/dev/null || true
       ${pkgs.iproute2}/bin/ip link set wlan0 up
 
-      # 5) 连 WiFi
-      ${config.systemd.package}/bin/systemctl restart wpa_supplicant.service 2>/dev/null || true
+      # 5) 交给 NetworkManager：固定 MAC 之后让 NM 接管 wlan0 并连上保存的连接
+      ${pkgs.networkmanager}/bin/nmcli device set wlan0 managed yes 2>/dev/null || true
+      ${pkgs.networkmanager}/bin/nmcli connection up venus-wifi 2>/dev/null || \
+        ${pkgs.networkmanager}/bin/nmcli connection up <WIFI_SSID> 2>/dev/null || true
 
-      # 6) 等关联完成（地址/DNS 由 systemd-networkd 负责）
+      # 6) 等拿地址（NM 管 DHCP/静态；我们声明的是静态 <LAN_PHONE_IP>）
       i=0; while [ $i -lt 40 ]; do
         [ "$(cat /sys/class/net/wlan0/carrier 2>/dev/null)" = "1" ] && break
         sleep 1; i=$((i+1))

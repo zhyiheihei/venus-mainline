@@ -1355,11 +1355,16 @@
 	remote-endpoint = <&venus_panel_in>;
 	data-lanes = <0 1 2 3>;
 	/*
-	 * 命令模式的帧提交需要 vsync 源。实测可用的是 mdp_vsync_e（配合 msm 里
-	 * tearcheck 的 19.2MHz 兜底补丁，见 dpu_encoder_phys_cmd.c）。
-	 * 试过 mdp_intf0 + 给 mdss 补 vsync 时钟，会把整机挂死，别再重复。
+	 * 命令模式面板需要 vsync 源。venus 的 TE 是经 DSI 回传的（厂商 DT:
+	 * te-pin-select=<1>、te-using-te-pin、te-dcs-command=<1>），板上没有把 TE
+	 * 接到 mdp_vsync 引脚（pinctrl 里没有 function="mdp_vsync" 的 pin），
+	 * 所以不能用 mdp_vsync_e（那是 Pixel 3 / LG G7 那种接了线的机器）。
+	 *
+	 * "timer0" = DPU 内置看门狗定时器按帧率产生周期性 vsync，
+	 * 负载值 CALCULATE_WD_LOAD_VALUE(fps) = (1000*19200)/(16*fps)，
+	 * 是硬件级、不依赖面板 TE 的稳定 vsync 源。
 	 */
-	qcom,te-source = "mdp_vsync_e";
+	qcom,te-source = "timer0";
 };
 
 &mdss_dsi0 {

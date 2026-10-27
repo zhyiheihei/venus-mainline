@@ -1271,3 +1271,60 @@ dmesg | grep 'venus: no vsync'                              → 空（兜底分�
   "TE 走 DSI 回传、板上没接到 mdp_vsync 引脚"的机器唯一可用的周期 vsync 源。
 - `console=tty0` 在恢复上游 DPU 代码 + v129 形态 preinit 之后**可以正常开机**
   （之前几次挂死是在"自创补丁 + sleep/解绑重绑"叠加的情况下发生的）。
+
+## 2026-10-27 · 事故复盘：systemd-initrd generation 与脚本式 initrd 混用导致"闭包起不来"
+
+### 现象
+
+刷入用 **官方 systemd initrd** 打的 boot.img（v149）后：
+
+```
+串口: An error occurred in stage 1 of the boot process, which must mount
+      the root filesystem on /mnt-root and then start stage 2
+      ... Continuing...
+      venus login: venus (automatic login)
+      Cannot execute /run/current-system/sw/bin/bash: No such file or directory   ← 无限循环
+SSH : OpenSSH 10.0 在听，但 publickey 被拒
+```
+
+### 误判（我一度以为是 store 损坏 / 磁盘满）
+
+用救援镜像挂上 sda34 后逐项核对，**全部排除**：
+
+```
+fsck: nixos: clean, 561888 files                 → 文件系统干净
+df  : 15.3G / 103G, 16%                           → 磁盘没满
+store: 11465 个路径，bash 是合法 ELF (7f 45 4c 46)，glibc loader 也在
+sw  : system-path 存在，bin/bash -> bash-interactive 存在
+```
+
+### 真正的根因（一条命令定论）
+
+```
+for g in system-*-link; do head -c 2 <target>/init | od -An -tx1; done
+
+2321  system-4..40-link      ← "#!"  脚本
+7f45  system-41-link         ← ELF   ★
+```
+
+**systemd-initrd 那代（system-41）的 `<system>/init` 是 ELF 二进制**，而我们的 boot.img 里仍然是
+**脚本式 stage-1** 的 initrd。脚本式 stage-1 的做法是 `exec <system>/init`，于是它 exec 了一个
+需要"systemd initrd 语义"（特定 /run 环境、`IN_NIXOS_SYSTEMD_STAGE1` 等）的二进制 →
+系统半启动：getty 在跑，但 `/run/current-system` 从未被创建 → 所有命令行都报
+`/run/current-system/sw/bin/bash: No such file or directory`。
+
+### 结论（写入纪律）
+
+- **boot.img 里的 initrd 必须与当前 generation 的实现匹配**：脚本式 initrd ⇄ 脚本式 generation，
+  systemd initrd ⇄ systemd generation。二者不能混。
+- 因此"启用 `boot.initrd.systemd.enable`"这一步**必须同时**换 boot.img 里的 initrd，
+  而且要在能拿到串口日志的前提下逐步验证（不能用 `nixos-rebuild boot` 只换系统、不换 initrd）。
+- 恢复手法：把 `/nix/var/nix/profiles/system` 切回脚本式 generation（`system-40-link`），
+  再刷回配套的 boot.img（v147）即可。
+
+### 救援手段（已验证可用）
+
+`venus-rescue.img` = 同一个内核 + v147 的 initrd，只把 `/init` 换成救援脚本：
+建 USB ACM 串口 → 挂 /dev/sda34 到 /mnt-root → 打印 profiles → 起 busybox root shell。
+**这条通道不依赖设备上的任何系统**，串口在 COM4（不是 COM3——端口号会变，要用
+`[System.IO.Ports.SerialPort]::GetPortNames()` 现查）。

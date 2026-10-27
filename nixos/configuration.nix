@@ -89,12 +89,10 @@ in
   services.getty.autologinUser = "venus";
 
   # ---------- venus 专有：WiFi 上电 + PCIe 重训 + 网络 ----------
-  systemd.services.venus-wifi-power = {
-    description = "venus: WiFi 上电、重训 PCIe、连 WiFi 并配置地址";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-udev-settle.service" "systemd-networkd.service" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 300; };
-    script = ''
+  # WiFi 上电/重训/关联逻辑写在 /etc 里，服务只负责把它丢到后台 —— 避免 16 秒阻塞启动
+  environment.etc."venus-wifi-setup" = {
+    mode = "0755";
+    text = ''
       set -u
       P=/sys/bus/platform/devices
 
@@ -166,6 +164,19 @@ in
         sleep 5
       fi
       ip -4 -o addr show wlan0 2>/dev/null || echo "警告：wlan0 没有地址"
+    '';
+  };
+
+  systemd.services.venus-wifi-power = {
+    description = "venus: WiFi 上电、重训 PCIe、连 WiFi（后台执行，不阻塞启动）";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-udev-settle.service" "systemd-networkd.service" ];
+    # Type=oneshot 若同步跑完会把 multi-user/graphical 一起拖住（实测 16 秒）。
+    # 这里只把设置脚本丢到后台就返回，启动流程不再等它。
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 20; };
+    script = ''
+      ${pkgs.util-linux}/bin/setsid /etc/venus-wifi-setup >/var/log/venus-wifi.log 2>&1 &
+      exit 0
     '';
   };
 

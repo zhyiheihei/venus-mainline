@@ -17,12 +17,21 @@
 #include <sound/soc-dapm.h>
 #include <sound/pcm.h>
 
+#include "qdsp6/q6afe.h"
 #include "common.h"
 
 #define VENUS_CS35L41_COMP	"cs35l41-codec"
 #define VENUS_DEFAULT_RATE	48000
 #define VENUS_SLOT_WIDTH	32
-#define VENUS_TDM_SLOTS		4	/* 厂商 TDM_MAX_SLOTS=4，32bit/槽 → BCLK 6.144MHz */
+/* 可调参数：方便在不重编驱动的情况下试不同 TDM 组合（AFE 接受哪种由 DSP 决定） */
+static int tdm_slots = 4;
+module_param(tdm_slots, int, 0644);
+static int tdm_slot_width = 32;
+module_param(tdm_slot_width, int, 0644);
+static int tdm_channels = 2;
+module_param(tdm_channels, int, 0644);
+static int tdm_mask = 0xF;
+module_param(tdm_mask, int, 0644);
 
 static int venus_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 				    struct snd_pcm_hw_params *params)
@@ -33,7 +42,40 @@ static int venus_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					SNDRV_PCM_HW_PARAM_CHANNELS);
 
 	rate->min = rate->max = VENUS_DEFAULT_RATE;
-	channels->min = channels->max = 2;
+	channels->min = channels->max = tdm_channels;
+
+	return 0;
+}
+
+/*
+ * 上游 sm8250 的机器驱动在 startup 里给 CPU DAI 设 LPASS 时钟（IBIT）和 fmt。
+ * TDM 同理：不设 Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT，DSP 会以 -22 拒绝 AFE enable。
+ */
+static int venus_be_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+	unsigned int bclk = VENUS_DEFAULT_RATE * tdm_slots * tdm_slot_width;
+	int ret;
+
+	switch (cpu_dai->id) {
+	case TERTIARY_TDM_RX_0:
+	case TERTIARY_TDM_RX_1:
+		ret = snd_soc_dai_set_sysclk(cpu_dai,
+					     Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT,
+					     bclk, SNDRV_PCM_STREAM_PLAYBACK);
+		if (ret)
+			dev_err(cpu_dai->dev, "set TDM ibit clk %u failed: %d\n",
+				bclk, ret);
+		snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+		snd_soc_dai_set_fmt(codec_dai,
+				     SND_SOC_DAIFMT_BC_FC | SND_SOC_DAIFMT_NB_NF |
+				     SND_SOC_DAIFMT_DSP_A);
+		break;
+	default:
+		break;
+	}
 
 	return 0;
 }
@@ -44,15 +86,24 @@ static int venus_be_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_component *comp;
-	unsigned int bclk = params_rate(params) * VENUS_TDM_SLOTS * VENUS_SLOT_WIDTH;
+	unsigned int bclk = params_rate(params) * tdm_slots * tdm_slot_width;
 	int i, ret;
 
 	/* TDM 槽位配置必须给 DSP：不给的话 AFE enable 会返回 -22（port 0x9020 无效参数） */
-	ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0, 0xF, VENUS_TDM_SLOTS,
-				       VENUS_SLOT_WIDTH);
+	ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0, tdm_mask, tdm_slots,
+				       tdm_slot_width);
 	if (ret) {
 		dev_err(cpu_dai->dev, "set_tdm_slot failed: %d\n", ret);
 		return ret;
+	}
+
+	/* 厂商对 TERT TDM 也调 set_channel_map（槽位映射），DSP 侧要这份映射 */
+	{
+		unsigned int slots[4] = { 0, 4, 8, 12 };
+		ret = snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
+						  tdm_channels, slots);
+		if (ret)
+			dev_err(cpu_dai->dev, "set_channel_map failed: %d\n", ret);
 	}
 
 	for_each_rtd_components(rtd, i, comp) {
@@ -72,6 +123,7 @@ static int venus_be_hw_params(struct snd_pcm_substream *substream,
 }
 
 static const struct snd_soc_ops venus_be_ops = {
+	.startup = venus_be_startup,
 	.hw_params = venus_be_hw_params,
 };
 

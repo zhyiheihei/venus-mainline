@@ -257,6 +257,36 @@ in
     IdleAction=ignore
   '';
 
+  # ---------- 电源/性能策略：跟随主线，不自己造开关 ----------
+  # 事实：主线 arm64 的 platform_profile 提供者只有笔记本 EC（Acer/Huawei/Lenovo/Hamoa），
+  # 同 CPU 的主线机型（sagami / mtp / hdk / star）都没有，所以它们也没有可用的
+  # "性能/平衡/省电"开关 —— power-profiles-daemon 在这些机器上都只能报 placeholder。
+  # 真正起作用的是内核这一套（本机已在跑，实测）：
+  #   cpufreq: schedutil（policy0/4/7 = 1.80/2.42/2.84GHz）
+  #   thermal: step_wise + 14 组 cooling-maps，
+  #            cooling device = cpufreq-cpu0/cpu4/cpu7、devfreq-3d00000.gpu、ath11k
+  # 所以这里不再加自定义调频服务：PPD 关掉（避免界面上给了不起作用的开关），
+  # 只保留桌面侧的熄屏/待机策略。
+  services.power-profiles-daemon.enable = false;
+
+  # Plasma 的电源管理默认值：只熄屏不睡眠（本机不支持 suspend，已在上方屏蔽）
+  environment.etc."xdg/powermanagementprofilesrc".text = ''
+    [AC][DimDisplay]
+    idleTime=120000
+
+    [AC][DPMSControl]
+    idleTime=300000
+
+    [Battery][DimDisplay]
+    idleTime=60000
+
+    [Battery][DPMSControl]
+    idleTime=180000
+
+    [LowBattery][BrightnessControl]
+    value=40
+  '';
+
   # 关屏/亮屏：只改背光亮度（DCS 0x51），不动 CRTC，避免 DPMS 恢复不了
   environment.etc."venus-bl-toggle.sh".text = ''
     #!/bin/sh

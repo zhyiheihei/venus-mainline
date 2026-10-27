@@ -315,6 +315,14 @@ static int venus_k2_prepare(struct drm_panel *panel)
 
 	msleep(30);
 
+	/*
+	 * 面板一上电就把亮度写到默认值（DCS 0x51）。
+	 * 否则亮度寄存器保持 0：fbcon 从第 3 秒起就在画日志，但屏幕物理上是黑的，
+	 * 一直到 systemd-backlight 恢复保存值（multi-user，40 秒后）才看得见。
+	 */
+	ret = mipi_dsi_dcs_set_display_brightness(ctx->dsi, 153 * 2047 / 255);
+	dev_info(dev, "venus-k2: 初始亮度写入 rc=%d\n", ret);
+
 	/* 诊断：读回 DCS 寄存器，确认面板真的在应答 */
 	ret = mipi_dsi_dcs_read(ctx->dsi, MIPI_DCS_GET_POWER_MODE, &pm, 1);
 	dev_info(dev, "venus-k2: 读 power_mode rc=%d val=0x%02x\n", ret, pm);

@@ -1288,6 +1288,45 @@
 		bias-pull-down;
 	};
 
+	/*
+	 * TERT TDM = MI2S2（同一硬件块）。厂商 DTB 里 tert_tdm 用 mi2s2 功能脚：
+	 *   gpio120 = mi2s2_sck   （位时钟）
+	 *   gpio122 = mi2s2_ws    （帧同步）
+	 *   gpio121 = mi2s2_data0 （DSP→功放 数据）
+	 *   gpio124 = mi2s2_data1
+	 * 之前完全没配 → TDM 总线上没有时钟和数据，DSP 的 RX 端口永远收不到数据，
+	 * 表现就是 aplay 一直 underrun（"DSP 不消费数据"）。
+	 */
+	venus_tert_tdm_sck: venus-tert-tdm-sck {
+		pins = "gpio120";
+		function = "mi2s2_sck";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+
+	venus_tert_tdm_ws: venus-tert-tdm-ws {
+		pins = "gpio122";
+		function = "mi2s2_ws";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
+	};
+
+	venus_tert_tdm_d0: venus-tert-tdm-d0 {
+		pins = "gpio121";
+		function = "mi2s2_data0";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	venus_tert_tdm_d1: venus-tert-tdm-d1 {
+		pins = "gpio124";
+		function = "mi2s2_data1";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
 	venus_bt_uart_pins: venus-bt-uart-pins {
 		pins = "gpio68", "gpio69", "gpio70", "gpio71";
 		function = "qup18";
@@ -1508,6 +1547,10 @@
 	sound {
 		compatible = "xiaomi,venus-sndcard";
 		model = "Xiaomi Mi 11 (venus)";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&venus_tert_tdm_sck>, <&venus_tert_tdm_ws>,
+			    <&venus_tert_tdm_d0>, <&venus_tert_tdm_d1>;
 
 		mm1-dai-link {
 			link-name = "MultiMedia1";

@@ -210,13 +210,16 @@ in
   };
 
 
-  # ---------- 音频 bring-up 期：先关掉 PipeWire/WirePlumber 的自动探测 ----------
-  # 它们在会话启动时会打开 MultiMedia1 播放一段静音，此时路由还没配好，
-  # DSP 会拒绝并把 AFE/ASM 留在坏状态（dmesg: no backend DAIs enabled for MultiMedia1），
-  # 之后我们自己测试就一直在跟一个已经坏掉的 DSP 打交道。
-  systemd.user.services.pipewire.enable = lib.mkForce false;
-  systemd.user.services.pipewire-pulse.enable = lib.mkForce false;
-  systemd.user.services.wireplumber.enable = lib.mkForce false;
+  # ---------- 音频 ----------
+  # PipeWire 保持开启（桌面通知音/播放器都靠它）。之前它开机就试播撞上"路由还没配好"，
+  # 现在 venus-audio-routing 在 sound.target 之后先把两条 BE 的 ADM 路由打开，
+  # 顺序上 PipeWire（用户会话，登录后才起）晚于它，所以不会再撞坏 DSP。
+  services.pipewire = {
+    enable = true;
+    alsa.enable = true;
+    alsa.support32Bit = false;
+    pulse.enable = true;
+  };
 
   # 开机就把两条 BE 的 ADM 路由打开，避免任何客户端第一次播放就撞上"没 backend"
   systemd.services.venus-audio-routing = {

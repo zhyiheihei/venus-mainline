@@ -1549,3 +1549,27 @@ sysrq-t 栈显示 `__delay_cycles`）。已收敛为 ≤1ms 重试、失败就�
 下一步要查的：ADM copp 的 FE→BE 连接是否真的建立（FE 2ch/48k S16 与
 BE 4slots×32bit 的对应关系）、q6asm RUN 的应答、以及是否需要给 BE 配
 `qcom,tdm-slot-mapping`。
+
+## 2026-10-27 · TERT TDM 引脚从未复用（重要发现）+ 一次静默死机
+
+### 发现
+
+厂商 DTB 里 tert_tdm 的引脚组是 MI2S2 功能（主线 pinctrl-sm8350.c 的组与本机一致）：
+
+    gpio120 = mi2s2_sck    （位时钟）
+    gpio122 = mi2s2_ws     （帧同步）
+    gpio121 = mi2s2_data0  （DSP→功放）
+    gpio124 = mi2s2_data1
+
+我们的 DTS 从来没配过这四根脚 → TDM 总线上没有时钟和数据，DSP 的 RX 端口
+永远收不到数据，这正好解释了"功放已上电、DSP 不报错、但数据不消费、aplay 一直 underrun"。
+
+已在 DTS 加 venus_tert_tdm_{sck,ws,d0,d1} 四个 pin group，并在 sound 节点用
+pinctrl-0 挂上、venus-snd 驱动 probe 时 devm_pinctrl_get_select_default()。
+
+### 事故
+
+刷 v194（含上述 pinctrl + 重新开启 PipeWire + 声音主题）后设备完全静默：
+无 WiFi、无 USB、无 COM3，与之前"用它自己造的 initrd 重打包后死机"形态相同。
+v194 镜像 106MB，v193 是 103MB，差异需要核对（怀疑 REFRESH=1 拉取的 initrd 有问题）。
+下一步：刷回 v193 验证 generation 本身没问题，再单独重做 boot.img。

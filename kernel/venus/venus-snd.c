@@ -13,6 +13,7 @@
  */
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/pinctrl/consumer.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/pcm.h>
@@ -146,7 +147,19 @@ static int venus_snd_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card;
 	struct device *dev = &pdev->dev;
+	struct pinctrl *pinctrl;
 	int ret;
+
+	/*
+	 * TERT TDM 走 MI2S2 的四个引脚（sck/ws/data0/data1），必须在开流之前
+	 * 把引脚复用到 mi2s2 功能上，否则 TDM 总线没有时钟和数据，
+	 * DSP 的 RX 端口收不到东西 → aplay 一直 underrun。
+	 */
+	pinctrl = devm_pinctrl_get_select_default(dev);
+	if (IS_ERR(pinctrl))
+		dev_warn(dev, "TDM 引脚复用失败: %ld\n", PTR_ERR(pinctrl));
+	else
+		dev_info(dev, "TERT TDM(MI2S2) 引脚已复用\n");
 
 	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
 	if (!card)

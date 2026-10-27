@@ -80,7 +80,7 @@ in
   networking.firewall.enable = false;
 
   # ---------- 下载代理（局域网 SOCKS5，直连 cache.nixos.org 极慢）----------
-  systemd.services.nix-daemon.environment = {
+  systemd.services.nix-daemon.environment = lib.mkForce {
     http_proxy = "socks5h://<LAN_PROXY_IP>:1080";
     https_proxy = "socks5h://<LAN_PROXY_IP>:1080";
     all_proxy = "socks5h://<LAN_PROXY_IP>:1080";
@@ -397,7 +397,7 @@ in
   i18n.defaultLocale = "en_US.UTF-8";
   hardware.firmware = [ venusFirmware ];
   environment.systemPackages = with pkgs; [
-    vim git htop tmux rsync curl wget iw wpa_supplicant usbutils pciutils busybox e2fsprogs zstd
+    vim git htop tmux rsync curl wget iw wpa_supplicant alsa-utils sox usbutils pciutils busybox e2fsprogs zstd
     # 桌面/取色/截图
     imagemagick
   ];

@@ -634,6 +634,7 @@
 		cirrus,gpio2-output-enable;
 		cirrus,asp-sdout-hiz = <3>;
 		#sound-dai-cells = <1>;
+		sound-name-prefix = "SPK-L";
 	};
 
 	cs35l41_r: speaker-amp@42 {
@@ -641,7 +642,7 @@
 		reg = <0x42>;
 		interrupt-parent = <&tlmm>;
 		interrupts = <116 IRQ_TYPE_LEVEL_LOW>;
-		reset-gpios = <&tlmm 15 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&tlmm 42 GPIO_ACTIVE_HIGH>;
 		VA-supply = <&vreg_s10b_1p8>;
 		VP-supply = <&vph_pwr>;
 		cirrus,boost-peak-milliamp = <4000>;
@@ -651,6 +652,7 @@
 		cirrus,gpio2-output-enable;
 		cirrus,asp-sdout-hiz = <3>;
 		#sound-dai-cells = <1>;
+		sound-name-prefix = "SPK-R";
 	};
 };
 
@@ -1501,3 +1503,43 @@
 	};
 };
 
+/* ---- 声卡：QDSP6 TERT TDM RX0/RX1 → 两颗 CS35L41（扬声器）---- */
+/ {
+	sound {
+		compatible = "xiaomi,venus-sndcard";
+		model = "Xiaomi Mi 11 (venus)";
+
+		mm1-dai-link {
+			link-name = "MultiMedia1";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		tdm0-dai-link {
+			link-name = "Tertiary TDM0 Playback";
+			cpu {
+				sound-dai = <&q6afedai TERTIARY_TDM_RX_0>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&cs35l41_l 0>;
+			};
+		};
+
+		tdm1-dai-link {
+			link-name = "Tertiary TDM1 Playback";
+			cpu {
+				sound-dai = <&q6afedai TERTIARY_TDM_RX_1>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+			codec {
+				sound-dai = <&cs35l41_r 0>;
+			};
+		};
+	};
+};

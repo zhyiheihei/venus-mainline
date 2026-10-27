@@ -133,3 +133,49 @@ elif anchor in s:
 else:
     print('警告: battmgr 补丁锚点没找到')
 PY
+
+# 8) venus 声卡机器驱动（QDSP6 TERT TDM → 两颗 CS35L41）
+cp "$root/kernel/venus/venus-snd.c" "$ksrc/sound/soc/qcom/"
+SK="$ksrc/sound/soc/qcom/Kconfig"; SM="$ksrc/sound/soc/qcom/Makefile"
+grep -q 'SND_SOC_VENUS' "$SK" || cat >> "$SK" <<'EOF'
+
+config SND_SOC_VENUS
+	tristate "SoC Machine driver for Xiaomi Mi 11 (venus)"
+	depends on QCOM_APR
+	depends on COMMON_CLK
+	select SND_SOC_QDSP6
+	select SND_SOC_QCOM_COMMON
+	help
+	  Xiaomi Mi 11 (venus) 声卡：TERT TDM RX0/RX1 接两颗 CS35L41 功放（扬声器）。
+EOF
+grep -q 'venus-snd.o' "$SM" || echo 'obj-$(CONFIG_SND_SOC_VENUS) += venus-snd.o' >> "$SM"
+echo "venus-snd 已加入 Kconfig/Makefile"
+
+# 9) q6afe-dai: TDM DAI 在 DT 没有 dai@N 子节点时用本机 Android 值兜底
+#    （sync-src=1 内部时钟是关键，为 0 时 DSP 以 -22 拒绝 AFE enable）
+python3 - "$ksrc/sound/soc/qcom/qdsp6/q6afe-dai.c" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+anchor = '''		case PRIMARY_TDM_RX_0 ... QUINARY_TDM_TX_7:
+			priv = &data->priv[id];
+			ret = of_property_read_u32(node, "qcom,tdm-sync-mode",'''
+add = '''		case PRIMARY_TDM_RX_0 ... QUINARY_TDM_TX_7:
+			priv = &data->priv[id];
+			/*
+			 * venus: 设备树没有 dai@N 子节点时用本机 Android DTB 的 TERT TDM
+			 * 取值兜底（sync-src=1 内部时钟，为 0 时 DSP 以 -22 拒绝 AFE enable）。
+			 */
+			priv->sync_mode = 0;
+			priv->sync_src = 1;
+			priv->data_out_enable = 0;
+			priv->invert_sync = 1;
+			priv->data_delay = 1;
+			priv->data_align = 0;
+			ret = of_property_read_u32(node, "qcom,tdm-sync-mode",'''
+if 'venus: 设备树没有 dai@N 子节点' in s:
+    print('q6afe-dai 兜底已在位')
+elif anchor in s:
+    p.write_text(s.replace(anchor, add, 1)); print('q6afe-dai 兜底已加')
+else:
+    print('警告: q6afe-dai 兜底锚点没找到')
+PY

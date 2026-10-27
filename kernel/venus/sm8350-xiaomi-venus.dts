@@ -1281,6 +1281,20 @@
 };
 
 &tlmm {
+	/*
+	 * 面板 TE（ tearing effect ）是**物理引脚**：厂商 DTB 里
+	 * qcom,platform-te-gpio = <&tlmm 0x52 0>，即 gpio82。
+	 * 把它复用到 mdp_vsync 硬件功能，DPU 的 vsync GPIO_0 才能收到真实 TE，
+	 * 命令模式面板的 tearcheck 才有真节奏（不再用定时器猜）。
+	 * 参数参照同类主线机型（qcm6490-fairphone-fp5 / sdm845-blueline）。
+	 */
+	venus_te_pins: venus-te-pins {
+		pins = "gpio82";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
 	venus_bt_uart_pins: venus-bt-uart-pins {
 		pins = "gpio68", "gpio69", "gpio70", "gpio71";
 		function = "qup18";
@@ -1343,6 +1357,12 @@
 
 &mdss_dsi0 {
 	vdda-supply = <&vreg_l6b_1p2>;
+
+	/* dsi_host.c 在 dsi_host_init 里 pinctrl_pm_select_default_state()，
+	 * 所以 TE 引脚的复用要挂在这里（不是面板节点，面板驱动不处理 pinctrl）。 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&venus_te_pins>;
+
 	status = "okay";
 };
 
@@ -1355,16 +1375,12 @@
 	remote-endpoint = <&venus_panel_in>;
 	data-lanes = <0 1 2 3>;
 	/*
-	 * 命令模式面板需要 vsync 源。venus 的 TE 是经 DSI 回传的（厂商 DT:
-	 * te-pin-select=<1>、te-using-te-pin、te-dcs-command=<1>），板上没有把 TE
-	 * 接到 mdp_vsync 引脚（pinctrl 里没有 function="mdp_vsync" 的 pin），
-	 * 所以不能用 mdp_vsync_e（那是 Pixel 3 / LG G7 那种接了线的机器）。
-	 *
-	 * "timer0" = DPU 内置看门狗定时器按帧率产生周期性 vsync，
-	 * 负载值 CALCULATE_WD_LOAD_VALUE(fps) = (1000*19200)/(16*fps)，
-	 * 是硬件级、不依赖面板 TE 的稳定 vsync 源。
+	 * 命令模式面板的 vsync 源。面板的 TE 接在 tlmm gpio82，已复用到 mdp_vsync
+	 * 硬件功能（见 venus_te_pins），对应 DPU 的 vsync GPIO_0 → "mdp_vsync_p"。
+	 * （dpu_kms.c 里 te-source 缺省就是 GPIO_0；同类机型 qcm6490-fairphone-fp5
+	 *   只做引脚复用、不写 te-source。）
 	 */
-	qcom,te-source = "timer0";
+	qcom,te-source = "mdp_vsync_p";
 };
 
 &mdss_dsi0 {

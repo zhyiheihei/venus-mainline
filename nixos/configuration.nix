@@ -55,6 +55,9 @@ in
       wifi = {
         ssid = "<WIFI_SSID>";
         mode = "infrastructure";
+        # BDF 里没有有效 MAC（每次 probe 都变），这里给固定值。
+        # 用 NM 的 cloned-mac-address 是官方做法，不再用 ip link set address。
+        cloned-mac-address = wifiMac;
       };
       wifi-security = {
         key-mgmt = "wpa-psk";
@@ -127,11 +130,10 @@ in
 
       # 内核已开 FW_LOADER_COMPRESS_ZSTD，可以直接用 NixOS 的 /run/current-system/firmware
 
-      # 1) 五路 WiFi 电源：只能在运行时打开（写进设备树会开机挂死）
-      for spec in "io 1800000" "dig 752000" "rfa1 1904000" "rfa2 1352000" "aon 500000"; do
-        set -- $spec
-        echo "$2" > "$P/regulator-wifi_$1/voltage" 2>/dev/null || true
-        echo enabled > "$P/regulator-wifi_$1/state" 2>/dev/null || true
+      # 1) 五路 WiFi 电源：只能运行时打开（写进设备树 regulator-boot-on 会开机挂死）。
+      #    电压已在 DTS 里按厂商值钉死，这里只负责 enabled/disabled。
+      for r in io dig rfa1 rfa2 aon; do
+        echo enabled > "$P/regulator-wifi_$r/state" 2>/dev/null || true
       done
       sleep 1
 
@@ -151,30 +153,10 @@ in
         sleep 2
       done
 
-      # 3) 等 ath11k 的网卡出现（名字可能是 wlan0 或 wlp1s0，取决于 udev 命名策略）
-      IFACE=""
-      i=0; while [ $i -lt 60 ]; do
-        for n in /sys/class/net/*; do
-          b=$(basename "$n")
-          [ "$b" = "lo" ] && continue
-          [ "$(readlink -f "$n/device/driver" 2>/dev/null | xargs -r basename)" = "ath11k_pci" ] && { IFACE=$b; break; }
-        done
-        [ -n "$IFACE" ] && break
-        sleep 1; i=$((i+1))
-      done
-      [ -n "$IFACE" ] || { echo "ath11k 网卡没出现"; exit 0; }
-      echo "ath11k 网卡: $IFACE"
-      # 统一改成 wlan0，脚本/配置都用这个名字
-      if [ "$IFACE" != "wlan0" ]; then
-        ${pkgs.iproute2}/bin/ip link set "$IFACE" down 2>/dev/null || true
-        ${pkgs.iproute2}/bin/ip link set "$IFACE" name wlan0 2>/dev/null || true
-      fi
-      [ -d /sys/class/net/wlan0 ] || { echo "改名为 wlan0 失败"; exit 0; }
-
-      # 4) 固定 MAC（BDF 里是占位值且每次 probe 都变）
-      ${pkgs.iproute2}/bin/ip link set wlan0 down 2>/dev/null || true
-      ${pkgs.iproute2}/bin/ip link set wlan0 address ${wifiMac} 2>/dev/null || true
-      ${pkgs.iproute2}/bin/ip link set wlan0 up
+      # 3) 等 ath11k 网卡出现（关了可预测命名，名字就是 wlan0）
+      i=0; while [ $i -lt 60 ] && [ ! -d /sys/class/net/wlan0 ]; do sleep 1; i=$((i+1)); done
+      [ -d /sys/class/net/wlan0 ] || { echo "ath11k 网卡没出现"; exit 0; }
+      echo "ath11k 网卡: wlan0"
 
       # 5) 交给 NetworkManager：固定 MAC 之后让 NM 接管 wlan0 并连上保存的连接
       ${pkgs.networkmanager}/bin/nmcli device set wlan0 managed yes 2>/dev/null || true

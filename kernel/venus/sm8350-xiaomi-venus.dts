@@ -308,13 +308,13 @@
 		vreg_s11b_0p95: smps11 {
 			regulator-name = "vreg_s11b_0p95";
 			regulator-min-microvolt = <752000>;
-			regulator-max-microvolt = <1000000>;
+			regulator-max-microvolt = <752000>;
 		};
 
 		vreg_s12b_1p25: smps12 {
 			regulator-name = "vreg_s12b_1p25";
-			regulator-min-microvolt = <1224000>;
-			regulator-max-microvolt = <1360000>;
+			regulator-min-microvolt = <1352000>;
+			regulator-max-microvolt = <1352000>;
 		};
 
 		vreg_l1b_0p88: ldo1 {
@@ -392,8 +392,8 @@
 
 		vreg_s1c_1p86: smps1 {
 			regulator-name = "vreg_s1c_1p86";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <2000000>;
+			regulator-min-microvolt = <1904000>;
+			regulator-max-microvolt = <1904000>;
 		};
 
 		vreg_s2c_0p8: smps2 {

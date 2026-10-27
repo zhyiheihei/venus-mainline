@@ -1359,3 +1359,29 @@ DPU 自带的定时器/INTF 产生周期 vsync，本质上是"猜节奏"。要�
 2. DPU 侧：`qcom,te-source` 指向该事件源（`mdp_intfN` / `mdp_vsync_*`）。
 
 这也是"开机那一下花屏"（ABL 交棒 → 我们接管）无法消除的原因之一。
+
+## 2026-10-27 · "无法拖动窗口/点不到标题栏"是会话卡死，不是驱动或 TE 的问题
+
+现象：用户报告触摸点不动窗口标题栏、拖不动窗口，但窗口内部按钮可以点。
+
+排查（证据优先）：
+
+```
+抓 /dev/input/event3 原始事件 47.5 秒（374→491 帧，10 段触碰）
+    key 事件 = 0                     ← 触摸驱动只报坐标，不注入任何按键
+    四角都能点到（用户实测）          ← 坐标映射正常，不存在边缘死区
+    pin 82 = mdp_vsync (device ae94000.dsi)  ← TE 引脚复用正常
+```
+
+`sudo systemctl restart display-manager` 后（第一次停在 greeter，再重启一次进入会话），
+用户确认"现在可以了"。即：**KWin 卡在 interactive-move 的抓取状态**，后续所有触摸拖动
+都被吞掉；重启会话即恢复。这与 KWin 已知的拖动锁死问题一致。
+
+补充事实：Qt 客户端装饰（CSD）窗口的标题栏拖动依赖 Qt 把触摸合成为鼠标拖动，
+轻点（tap）能合成点击，所以"按钮可点、标题栏拖不动"在会话卡死时尤其明显。
+
+### 记档
+
+- 遇到"触摸能点不能拖"先重启用户会话，不要先怀疑驱动；
+- `systemctl restart display-manager` 有时第一次会停在 SDDM greeter，再执行一次即可
+  （本次第一轮还有 plasma-xdg-desktop-portal-kde 崩溃、plasma_waitforname 超时）。

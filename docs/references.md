@@ -164,3 +164,19 @@ model/compatible/board-id 完全吻合。
 推论：主线内核不吃 dtbo overlay 机制，所以想让我们的 DTB 生效只有两条路：
 1. **star 配方**（已实证）：`header_version 1` + `Image.gz + dtb` 拼接 + 清空 dtbo_b，让 ABL 用 boot 镜像里的 DTB；
 2. 自己造一个 dtbo_b（把我们的完整 DTB 当"overlay"塞进去）—— 不推荐，ABL 会按 board-id 挑选且可能校验表结构。
+
+## 2026-10-27 · 查证：同型号/同芯片有没有人把喇叭做通？
+
+- **主线**：`grep -r 'TERTIARY_TDM_RX_0' arch/arm64/boot/dts/qcom/` 只有我们自己的 venus.dts。
+  即主线没有任何设备用过 Q6AFE 的 TDM 路径（MI2S 才有大量用户）。
+- **CS35L41**：主线的 cs35l41 用户只有索尼机型（sm8250-edo / sm8350-sagami / sm8450-nagara），
+  它们 DTS 里有功放节点，但**没有声卡 dai-link**，等于没接。
+- **同芯片主线机型**（sagami / mtp / hdk / star）：音频全部未接（star 也一样）。
+- **上游 TDM 支持的时间线**：Qualcomm 的 Prasad Kumpatla 在 2026-06 才提交
+  «ASoC: qcom: add AudioReach TDM backend support»（AudioReach/Q6APM 路径），
+  我们这棵 7.2.6 里还没有（q6apm-lpass-dais.c 无 TDM）。而本机 ADSP 固件只支持老的
+  Q6AFE/APR 路径 → 只能自己把厂商的 TDM 组设备支持移植进 mainline q6afe（已完成）。
+- **厂商侧**（Xiaomi OSS / Evolution-X 内核 techpack/audio）：TDM 走"组设备"
+  `AFE_MODULE_GROUP_DEVICE` + `AFE_PARAM_ID_GROUP_DEVICE_TDM_CONFIG`，
+  组 id = 端口 id + 0x100，`num_channels = nslots_per_frame`、`bit_width = slot_width`，
+  DT 里 `qcom,msm-cpudai-tdm-clk-rate = 0x177000`（1.536MHz）。

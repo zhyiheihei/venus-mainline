@@ -1255,15 +1255,6 @@
 		startup-delay-us = <200000>;
 	};
 
-	bt_en: regulator-bt-en {
-		compatible = "regulator-fixed";
-		regulator-name = "bt_en";
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-		gpio = <&tlmm 65 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		regulator-boot-on;
-	};
 };
 
 /* ---- GPU: Adreno 660 ---- */
@@ -1312,8 +1303,9 @@
 		compatible = "qcom,wcn6855-bt";
 
 		/* 厂商 DTB 实证：bt-reset-gpio = tlmm 65、bt-sw-ctrl-gpio = tlmm 153。
-		 * 这两个 GPIO 交给 hci_qca 自己控制（复位脉冲 + 读 SW_CTRL）；
-		 * 实测该组合下固件下载成功："QCA setup on UART is completed"。 */
+		 * GPIO65 只由 hci_qca 通过 enable-gpios 驱动（复位脉冲 + 读 SW_CTRL）。
+		 * 注意：不能再给 65 号脚套一个 regulator-fixed，否则两个 owner 互相
+		 * 覆盖，芯片拿不到干净的复位脉冲 → ROM 版本读取 0xfc00 一直超时。 */
 		enable-gpios = <&tlmm 65 GPIO_ACTIVE_HIGH>;
 		swctrl-gpios = <&tlmm 153 GPIO_ACTIVE_HIGH>;
 
@@ -1336,10 +1328,19 @@
 
 /* ---- wlan_en / bt_en 的运行时开关(套一层 regulator-output 才有可写 state) ---- */
 / {
-	wlan_en_ctl: regulator-wlan-en-ctl {
-		compatible = "regulator-output";
-		regulator-name = "wlan_en_ctl";
-		vout-supply = <&wlan_en>;
+	/*
+	 * BT_EN（gpio65）由这个 fixed regulator 在开机就拉高。
+	 * 关键：只有它在时，hci_qca 才不会在 1.6s 的 probe 阶段就去做固件下载
+	 * （那时 preinit 还没把 firmware_class.path 指向 /run/current-system/firmware，
+	 *  必然 -2 失败并把芯片留在坏状态）；上电/固件下载会推迟到 open，届时路径已就绪。
+	 */
+	bt_en: regulator-bt-en {
+		compatible = "regulator-fixed";
+		regulator-name = "bt_en";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 65 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
 		regulator-boot-on;
 	};
 
@@ -1349,6 +1350,14 @@
 		vout-supply = <&bt_en>;
 		regulator-boot-on;
 	};
+
+	wlan_en_ctl: regulator-wlan-en-ctl {
+		compatible = "regulator-output";
+		regulator-name = "wlan_en_ctl";
+		vout-supply = <&wlan_en>;
+		regulator-boot-on;
+	};
+
 };
 
 /* ---- 显示: mdss / dsi0 / dsi0_phy / 面板 ---- */

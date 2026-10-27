@@ -100,6 +100,17 @@ fi
 
 exec $stage1
 EOS
+# 蓝牙固件必须放进 initrd：hci_qca 在 1.6s 就 probe 并请求 qca/hpbtfw10.tlv，
+# 那时 preinit 还没来得及把 firmware_class.path 指到 /run/current-system/firmware，
+# 结果就是 "Direct firmware load ... failed with error -2"。
+mkdir -p "$work/ird/lib/firmware/qca" 2>/dev/null || \
+  { rm -rf "$work/ird/lib"; mkdir -p "$work/ird/lib/firmware/qca"; }
+for f in hpbtfw10.tlv hpbtfw21.tlv; do
+  [ -f "$root/nixos/firmware/qca/$f" ] && cp "$root/nixos/firmware/qca/$f" "$work/ird/lib/firmware/qca/" || true
+done
+for f in "$root"/nixos/firmware/qca/hpnv10.*; do
+  [ -f "$f" ] && cp "$f" "$work/ird/lib/firmware/qca/" || true
+done
 chmod +x "$work/ird/venus-preinit.sh"
 rm -f "$work/ird/init" 2>/dev/null || true; ln -s /venus-preinit.sh "$work/ird/init"
 ( cd "$work/ird" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9 > "$work/initrd.cpio.gz" )

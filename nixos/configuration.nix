@@ -177,9 +177,17 @@ in
       /run/current-system/sw/bin/rfkill unblock bluetooth 2>/dev/null || true
       /run/current-system/sw/bin/systemctl start bluetooth.service 2>/dev/null || true
       sleep 3
-      /run/current-system/sw/bin/hciconfig -a 2>/dev/null | head -6 || true
-      # 电源轨已就位，这时候才给控制器上电（BlueZ 才能把 adapter 暴露给桌面）
-      /run/current-system/sw/bin/bluetoothctl power on 2>&1 | tail -2 || true
+      # 9) 蓝牙上电：电源轨稳了之后多试几次（芯片的固件下载在 open 时才做，
+      #    第一次 open 常因为固件路径/时序返回 Failed，第二次就能成功）
+      for i in 1 2 3 4 5 6; do
+        /run/current-system/sw/bin/bluetoothctl power on >/dev/null 2>&1 || true
+        if /run/current-system/sw/bin/bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
+          echo "蓝牙已上电（第 $i 次）"
+          break
+        fi
+        sleep 6
+      done
+      /run/current-system/sw/bin/hciconfig -a 2>/dev/null | head -4 || true
     '';
   };
 

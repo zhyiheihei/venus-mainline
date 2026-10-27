@@ -319,61 +319,6 @@ in
     "dm-mod"
   ];
 
-  # ---------- initrd：用 NixOS 官方的 systemd stage-1 ----------
-  # 脚本式 stage-1 在 NixOS 26.05 起已弃用、26.11 将删除；systemd initrd 是官方方向。
-  # 同时不再"解包 NixOS initrd → 注入自写 preinit → 重打包"（那套 hack 是 30 秒空档的来源）。
-  boot.initrd.systemd.enable = true;
-
-  # 面板点亮：initrd 里就把显示链路模块加载好，fbcon 从第 3 秒起就能刷日志
-  boot.initrd.systemd.services.venus-display-early = {
-    description = "venus: initrd 里加载显示链路（面板点亮）";
-    wantedBy = [ "initrd.target" ];
-    before = [ "sysroot.mount" ];
-    unitConfig.DefaultDependencies = false;
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-    script = ''
-      for m in qcom-refgen-regulator cec drm_display_helper drm_dp_aux_bus drm_exec \
-               drm_gpuvm gpu-sched mdt_loader ubwc_config msm panel-xiaomi-venus-k2; do
-        ${pkgs.kmod}/bin/modprobe "$m" 2>/dev/null || true
-      done
-    '';
-  };
-
-  # USB ACM 串口：initrd 里就建好，console=ttyGS0 才有东西可以挂
-  boot.initrd.systemd.services.venus-usb-gadget = {
-    description = "venus: initrd 里建立 USB ACM gadget";
-    wantedBy = [ "initrd.target" ];
-    unitConfig.DefaultDependencies = false;
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-    script = ''
-      mkdir -p /sys/kernel/config
-      mount -t configfs configfs /sys/kernel/config 2>/dev/null || true
-      UDC=$(cat /sys/class/udc/* 2>/dev/null | head -1)
-      [ -n "$UDC" ] || exit 0
-      G=/sys/kernel/config/usb_gadget/venus
-      mkdir -p "$G" "$G/strings/0x409" "$G/configs/c.1/strings/0x409" 2>/dev/null
-      echo 0x18d1 > "$G/idVendor"; echo 0x4ee1 > "$G/idProduct"
-      echo venus-m1 > "$G/strings/0x409/serialnumber"
-      echo Xiaomi > "$G/strings/0x409/manufacturer"
-      echo venus > "$G/strings/0x409/product"
-      echo ACM > "$G/configs/c.1/strings/0x409/configuration"
-      mkdir -p "$G/functions/acm.GS0"
-      ln -sf "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" 2>/dev/null
-      echo "$UDC" > "$G/UDC" 2>/dev/null
-    '';
-  };
-
-  # 固件路径（NixOS 的 .zst 固件在 /run/current-system/firmware）
-  boot.initrd.systemd.services.venus-firmware-path = {
-    description = "venus: 指定固件搜索路径";
-    wantedBy = [ "initrd.target" ];
-    unitConfig.DefaultDependencies = false;
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-    script = ''
-      echo /run/current-system/firmware > /sys/module/firmware_class/parameters/path 2>/dev/null || true
-    '';
-  };
-
   # ---------- 显示模块尽早加载 ----------
   # 目标：让面板在 stage-2 一开始就点亮，屏幕上就能刷内核/服务日志。
   # 注意：模块进 initrd（真正从第 1 秒起就有日志）需要把自建内核连同模块

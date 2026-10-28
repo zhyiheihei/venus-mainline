@@ -1573,3 +1573,79 @@ pinctrl-0 挂上、venus-snd 驱动 probe 时 devm_pinctrl_get_select_default()�
 无 WiFi、无 USB、无 COM3，与之前"用它自己造的 initrd 重打包后死机"形态相同。
 v194 镜像 106MB，v193 是 103MB，差异需要核对（怀疑 REFRESH=1 拉取的 initrd 有问题）。
 下一步：刷回 v193 验证 generation 本身没问题，再单独重做 boot.img。
+
+## 2026-10-28 · v197 砖机救援全程（EDL/firehose）与最终定性
+
+### 事件线
+
+v197（内核 DYNAMIC_DEBUG + 新 DTB + 新 initrd，三改齐上）刷入后整机无响应，
+按键组合全部失效、9008 从不出现 → 拆后盖断电池、短接 COMPEQ 旁两个镀金焊盘 →
+05c6:9008 进入 EDL。期间发现**拔掉电池 + 插 USB 即自动进 9008，短接点此后不再需要**；
+且 9008 会话是粘滞的（拔插 USB 不会退出，必须真断电）。
+
+### 工具教训（全部实测）
+
+- 开源 edl / qdl 在本机上传 loader 均失败（END OF IMAGE status 8 / status 1 /
+  卡 "uploading" 不动）；官方 **QSaharaServer.exe 一次成功**（903000 B in 0.141s）。
+  MiFlash20220507 自带 fh_loader.exe + QSaharaServer.exe 是本机唯一可用通道。
+- Windows 驱动：MiFlash 包内 `Source\ThirdParty\Qualcomm\Driver\qcser.inf`，
+  `pnputil /add-driver ... /install` 装好后枚举为 Qualcomm HS-USB QDLoader 9008 (COM)。
+- fh_loader 坑：`--sendxml` 必须绝对路径（相对路径报 access mode 'rb'）；
+  必须 `--memoryname=ufs`（默认 eMMC 报 slot 0 错误）；
+  **`--verify_programming` 会把本地源镜像截断**（走读流程写回同名文件，v193.img
+  103,022,592 → 41,500,672 字节），残缺镜像写进 boot 直接不开机——已重传修复；
+  **读取大分区会丢块错位**（misc 回读少 81,920 字节，0x100000 的 VENUS49 日志错位到
+  0xec000），读取不能用于校验；写入（{SUCCESS} 40MB/s ×2）可信。
+
+### 已验证事实（哈希/结构级证据）
+
+- boot_a / boot_b = v193 完整写入（98.25MB、25152 sectors、{SUCCESS}×2，源文件 md5 复核）
+- abl_a / abl_b = 完整 ELF（2,097,152 B，非零 ~202k 字节）；vbmeta_b = "AVB0" 签名块完好
+- misc：`bootonce-bootloader` BCB 仍在；oops 分区全是厂商内核旧 crash（Index 258–265，
+  Android clang build 2025-03/2025-12，与我们内核无关）
+- GPT：5 LUN / 114 分区完好；firehose 下 UFS 读写稳定 40MB/s
+
+### 最终现象与定性
+
+任何复位/冷启动后，PBL→XBL→ABL 引导链不产生除 9008 外的任何 USB（fastboot/内核/串口
+均无）。firehose 无"直接引导 fastboot"命令；boot 镜像内容已无关（ABL 未运行）。
+按键排线拔除测试未完成回报，用户于 21:43 选择结案：**判定为引导链层面死亡，
+PBL/EDL/UFS/存储完全可用**。
+
+### 遗留与可用性
+
+- 唯一未试的挽救手段：官方包 rawprogram/patch XML 全链刷写（xbl/xbl_config/abl/tz/hyp
+  等全套，可剥掉 userdata 保留 NixOS 数据）。
+- NixOS 数据（sda34）可随时经 EDL 读出（misc-read 类命令虽丢块，但数据可校验后提取）。
+- Windows 侧工具已固化：`C:\Users\<windows-user>\mi11\`（MiFlash20220507、官方 loader ×3、
+  rawprogram_boot.xml、v193.img），驱动已装（oem14.inf / Qualcomm Ports）。
+- 本机 loader 副本：`~/mi11-work/venus-firehose/`（/tmp 会被清理，勿再放 /tmp）。
+
+### 补充：两层因果的区分（v197 风险清单 vs 持久损伤）
+
+v197 = 内核 Image（开 DYNAMIC_DEBUG，全模块重编）+ 新 DTB + 新 initrd，三改齐上，
+且 dd 写的是当时唯一可启动的活动槽 boot_b（无安全网）。
+
+- **能解释"当场崩死"**：串口铁证 v197 跑到 `venus login` 后、WiFi 上来前消失——
+  时序正好落在 venus-wifi-power modprobe 重模块的窗口；新 Image 与磁盘 generation
+  的模块符号/vermagic 错配会在这一步 oops（当时四条修正的第 2 条即为此）。
+  DTB/initrd 两条风险未兑现（内核跑到了用户态）。
+- **解释不了持久损伤**：上述原因只产生可恢复的崩溃循环；实际现象是按键彻底失效、
+  重刷写盘已验证的 v193 后 PBL→XBL→ABL 仍不启动。
+- 持久损伤定位：XBL 阶段（PBL 每次冷启动自动落 EDL）。**盲区**：xbl_a/xbl_b/
+  xbl_config 闪存内容因"读取即杀会话"从未验证。v197 的 dd 只写 LUN4，理论上
+  不触及 LUN1/2——持久损伤的成因未定位，唯一能覆盖该盲区的手段是官方
+  rawprogram 全链刷写（重写 xbl/xbl_config/abl/tz/hyp 全套）。
+
+### 项目终止（2026-10-28）
+
+设备在**音频适配过程**中损坏：2026-10-27 为音频线刷入 v197（内核配置 + DTB + initrd
+三改齐上、无回退槽）后整机无响应，2026-10-28 全天 EDL 救援确认 PBL→XBL→ABL 引导链
+不启动、按键失效、无法恢复（软件侧唯一未试手段为官方 rawprogram 全链刷写）。
+
+**本项目于 2026-10-28 终止更新。**
+
+终止时的硬件支持情况（全部实机验证）：内核/NixOS ✅、UFS ✅、USB ✅、WiFi ✅、
+蓝牙 ✅、显示（面板+DSC+真TE+120Hz）✅、桌面 Plasma 6 ✅、触屏 ✅、GPU（FD660+turnip）✅、
+电池电量 ✅、按键 ✅、调试通道 ✅；音频（喇叭/麦克风/通话）❌、基带 ❌。
+完整清单见 AGENTS.md「硬件支持情况」。仓库全部资产保留，供同类 SM8350 机型移植参考。

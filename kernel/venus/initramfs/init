@@ -2,9 +2,10 @@
 # venus initramfs /init  —— 双系统引导
 #
 # 优先级:
-#   1) /dev/sda34  ext4 标签 nixos   → NixOS（/nix 存在且 /sbin/init 存在）
-#   2) /dev/sda29  ext4 标签 venusroot → Alpine 救援系统（/venus-root 标记）
+#   1) ext4 标签 nixos     → NixOS（/nix 存在且 system profile 里有 init）
+#   2) ext4 标签 venusroot → Alpine 救援系统（/venus-root 标记）
 #   3) 都失败 → 在内存里起一份 Alpine（保证任何情况下都能调）
+# 注意: 一律按**标签**找根, 不写死分区号(8GB 与 12GB 机型的 sda 编号可能不同)
 BB=/bin/busybox
 
 $BB --install -s /bin 2>/dev/null
@@ -39,16 +40,28 @@ setup_acm() {
 }
 setup_acm && echo "[initramfs] USB ACM 串口已就绪: /dev/ttyGS0"
 
+find_by_label() {
+  for d in /dev/sd*; do
+    [ -b "$d" ] || continue
+    [ "$($BB blkid -o value -s LABEL "$d" 2>/dev/null)" = "$1" ] && { echo "$d"; return 0; }
+  done
+  return 1
+}
+
 # 等 UFS 探测完成（QMP PHY probe 异步）
 i=0
+ROOTDEV=""
 while [ $i -lt 20 ]; do
-  [ -b /dev/sda34 ] && break
+  ROOTDEV=$([ -b /dev/sda ] && find_by_label nixos) || ROOTDEV=""
+  [ -n "$ROOTDEV" ] && break
   $BB sleep 1
   i=$((i+1))
 done
 
 boot_nixos() {
-  mount -t ext4 -o rw /dev/sda34 /newroot 2>/dev/null || return 1
+  dev=${ROOTDEV:-$(find_by_label nixos)}
+  [ -n "$dev" ] || return 1
+  mount -t ext4 -o rw "$dev" /newroot 2>/dev/null || return 1
   # NixOS 的系统入口不是 /sbin/init, 而是 system profile 里的 init。
   # 注意: profile 里的符号链接是**绝对路径**(/nix/store/...), 直接在新根外面测
   # `-x /newroot/.../system/init` 会被内核解析到 initramfs 自己的 /nix 上而失败,
@@ -99,7 +112,9 @@ EOSH
 }
 
 boot_alpine() {
-  mount -t ext4 -o rw /dev/sda29 /newroot 2>/dev/null || return 1
+  dev=$(find_by_label venusroot)
+  [ -n "$dev" ] || return 1
+  mount -t ext4 -o rw "$dev" /newroot 2>/dev/null || return 1
   if [ -f /newroot/venus-root ] && [ -x /newroot/bin/busybox ]; then
     mkdir -p /newroot/dev /newroot/proc /newroot/sys /newroot/tmp /newroot/run 2>/dev/null
     mount --move /dev /newroot/dev 2>/dev/null

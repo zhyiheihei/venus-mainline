@@ -18,15 +18,26 @@ work=$kdir/bootimg-work
 
 mkdir -p "$kdir" "$work"
 
-# 1) 内核 + DTB（先把仓库里的 DTS 同步进内核树，避免用到旧副本）
-echo "== 编内核/DTB =="
-cp "$root/kernel/venus/sm8350-xiaomi-venus.dts" \
-   "$kdir/linux-7.2.6/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dts"
-( cd "$root" && nix develop -c bash -c "cd '$build' && make ARCH=arm64 \
-    CROSS_COMPILE=aarch64-unknown-linux-gnu- -j\$(nproc) Image dtbs" ) 2>&1 | grep -E 'OBJCOPY|DTC|error' | tail -3 || true
+# 1) 内核 + DTB（默认现场编；KERNEL_IMAGE / DTB 给了就直接用）
+#    换机/离线安装时没有设备可取 initrd，用 INITRD=<initrd 文件> 指定
+KERNEL_IMAGE=${KERNEL_IMAGE:-}
+DTB=${DTB:-}
+INITRD=${INITRD:-}
 
-# 2) NixOS initrd（带缓存）
-if [ "${REFRESH:-0}" = "1" ] || [ ! -s "$cache" ]; then
+if [ -z "$KERNEL_IMAGE" ] || [ -z "$DTB" ]; then
+  echo "== 编内核/DTB =="
+  cp "$root/kernel/venus/sm8350-xiaomi-venus.dts" \
+     "$kdir/linux-7.2.6/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dts"
+  ( cd "$root" && nix develop -c bash -c "cd '$build' && make ARCH=arm64 \
+      CROSS_COMPILE=aarch64-unknown-linux-gnu- -j\$(nproc) Image dtbs" ) 2>&1 | grep -E 'OBJCOPY|DTC|error' | tail -3 || true
+fi
+KERNEL_IMAGE=${KERNEL_IMAGE:-$build/arch/arm64/boot/Image}
+DTB=${DTB:-$build/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb}
+
+# 2) NixOS initrd（带缓存；INITRD= 指定时直接用）
+if [ -n "$INITRD" ]; then
+  cache=$INITRD
+elif [ "${REFRESH:-0}" = "1" ] || [ ! -s "$cache" ]; then
   echo "== 从设备取 NixOS initrd =="
   ssh venus "cp \$(readlink -f /nix/var/nix/profiles/system/initrd) /tmp/nixos-initrd.bin"
   "$here/vpull.sh" /tmp/nixos-initrd.bin "$work" >/dev/null
@@ -85,9 +96,14 @@ fi
 # 固件搜索路径（NixOS 的 .zst 固件在 /run/current-system/firmware）
 echo /run/current-system/firmware > /sys/module/firmware_class/parameters/path 2>/dev/null
 
-# 自愈: 根文件系统上的 /init
+# 自愈: 根文件系统上的 /init（按标签找根, 不写死分区号 —— 8GB/12GB 机型 sda 编号可能不同）
 mkdir -p /fixroot
-if mount -t ext4 /dev/sda34 /fixroot 2>/dev/null; then
+ROOTDEV=""
+for d in /dev/sd*; do
+  [ -b "\$d" ] || continue
+  [ "\$(blkid -o value -s LABEL "\$d" 2>/dev/null)" = nixos ] && { ROOTDEV="\$d"; break; }
+done
+if mount -t ext4 "\${ROOTDEV:-none}" /fixroot 2>/dev/null; then
   [ -e /fixroot/init ] || { ln -sfn /nix/var/nix/profiles/system/init /fixroot/init; sync; }
   umount /fixroot 2>/dev/null
 fi
@@ -118,8 +134,8 @@ rm -f "$work/ird/init" 2>/dev/null || true; ln -s /venus-preinit.sh "$work/ird/i
 
 # 4) 拼接 + mkbootimg
 echo "== mkbootimg =="
-gzip -9 -c "$build/arch/arm64/boot/Image" > "$work/Image.gz"
-cat "$work/Image.gz" "$build/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb" > "$work/Image.gz-dtb"
+gzip -9 -c "$KERNEL_IMAGE" > "$work/Image.gz"
+cat "$work/Image.gz" "$DTB" > "$work/Image.gz-dtb"
 
 cmdline="firmware_class.path=/venus-fw console=tty0 console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init boot.shell_on_fail \
 net.ifnames=0 loglevel=7 firmware_class.path=/run/current-system/firmware \

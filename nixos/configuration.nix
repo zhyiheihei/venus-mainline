@@ -111,10 +111,19 @@ in
     initialPassword = "venus";
   };
 
+  # NM 默认开 WiFi 省电(3=enabled)，ath11k 在省电下会掉流量（表现为连上后 ping 不通）
+  environment.etc."NetworkManager/conf.d/99-venus-powersave.conf".text = ''
+    [connection]
+    wifi.powersave=2
+  '';
+
   # ---------- 串口登录（USB ACM，WiFi 挂了也能进去）----------
   systemd.services."serial-getty@ttyGS0" = {
     enable = true;
     wantedBy = [ "getty.target" ];
+    # gadget 由 venus-acm 在 systemd 里重建，必须先于 getty
+    after = [ "venus-acm.service" ];
+    requires = [ "venus-acm.service" ];
     serviceConfig = { Restart = "always"; RestartSec = 1; };
   };
   # greetd 负责拉桌面；tty1 不开 sway，保留自动登录方便串口/本地登录
@@ -158,6 +167,9 @@ in
       [ -d /sys/class/net/wlan0 ] || { echo "ath11k 网卡没出现"; exit 0; }
       echo "ath11k 网卡: wlan0"
 
+      # 关掉省电：ath11k 在 PS 模式下会偶发丢流量（表现为拿到地址后 ping 不通）
+      ${pkgs.iw}/bin/iw dev wlan0 set power_save off 2>/dev/null || true
+
       # 5) 交给 NetworkManager：固定 MAC 之后让 NM 接管 wlan0 并连上保存的连接
       ${pkgs.networkmanager}/bin/nmcli device set wlan0 managed yes 2>/dev/null || true
       ${pkgs.networkmanager}/bin/nmcli connection up venus-wifi 2>/dev/null || \
@@ -193,6 +205,57 @@ in
         sleep 6
       done
       /run/current-system/sw/bin/hciconfig -a 2>/dev/null | head -4 || true
+    '';
+  };
+
+  # ---- 串口在 systemd 启动后会丢（dwc3 重新 probe 把 configfs gadget 拆掉），
+  # 而串口是本项目唯一的诊断通道，所以由 systemd 再建一次，并挂一个 getty。
+  systemd.services.venus-acm = {
+    description = "venus: 重建 USB ACM 串口 (console=ttyGS0)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-udev-settle.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    script = ''
+      mkdir -p /sys/kernel/config
+      mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config || true
+      UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+      [ -n "$UDC" ] || { echo "没找到 UDC"; exit 0; }
+      G=/sys/kernel/config/usb_gadget/venus
+      mkdir -p "$G" "$G/strings/0x409" "$G/configs/c.1/strings/0x409"
+      echo 0x18d1 > "$G/idVendor"
+      echo 0x4ee1 > "$G/idProduct"
+      echo 0x0100 > "$G/bcdDevice"
+      echo 0x0200 > "$G/bcdUSB"
+      echo venus-m1 > "$G/strings/0x409/serialnumber"
+      echo Xiaomi > "$G/strings/0x409/manufacturer"
+      echo venus > "$G/strings/0x409/product"
+      echo ACM > "$G/configs/c.1/strings/0x409/configuration"
+      echo 250 > "$G/configs/c.1/MaxPower"
+      mkdir -p "$G/functions/acm.GS0"
+      ln -sf "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" || true
+      echo "$UDC" > "$G/UDC" || true
+    '';
+  };
+
+  # ---- WiFi 掉线取证：把链路/地址/NM 状态周期性落到 /var/log/venus-net.log，
+  # 这样即使串口掉了，下次也能从磁盘读到现场
+  systemd.services.venus-net-watch = {
+    description = "venus: 网络/链路状态记录";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "venus-wifi-power.service" ];
+    serviceConfig = { Type = "simple"; Restart = "always"; };
+    script = ''
+      while true; do
+        {
+          echo "=== $(date '+%F %T')"
+          ${pkgs.iw}/bin/iw dev wlan0 link 2>&1 | head -8
+          ${pkgs.iproute2}/bin/ip -4 -o addr show wlan0 2>&1
+          ${pkgs.networkmanager}/bin/nmcli -t -f GENERAL.STATE,IP4.ADDRESS device show wlan0 2>&1 | head -3
+          echo "carrier=$(cat /sys/class/net/wlan0/carrier 2>/dev/null)"
+        } >> /var/log/venus-net.log 2>&1
+        if [ $(stat -c %s /var/log/venus-net.log 2>/dev/null || echo 0) -gt 262144 ]; then tail -c 100000 /var/log/venus-net.log > /var/log/venus-net.log.tmp && mv /var/log/venus-net.log.tmp /var/log/venus-net.log; fi
+        sleep 30
+      done
     '';
   };
 
@@ -353,6 +416,9 @@ in
         modDirVersion = "7.2.6";
         version = "7.2.6";
         features = { };
+        # NixOS 的 hardware.device-tree.enable 默认取 kernel.buildDTBs，
+        # 自建包没这个属性会求值报错（我们不编 dtb，dtb 在打 boot.img 时用）
+        buildDTBs = false;
       };
     });
     base = {

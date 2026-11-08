@@ -42,12 +42,12 @@
 	qcom,board-id = <0x10008 0x0>;
 	chassis-type = "handset";
 
-	/* 本机实测(Android /sys/firmware/fdt): 8GB */
-	memory@80000000 {
+	/* 内存布局交给 ABL 按实际 DDR 容量填(与 stock venus DT 一致: 下游 base DTB 里
+	 * 就是这个全零占位)。不要写死: 8GB 与 12GB 机型的映射不同, 写死旧机的值在
+	 * 新机上必然错。 */
+	memory {
 		device_type = "memory";
-		reg = <0x00 0x80000000 0x00 0x39700000>,
-		      <0x01 0x80000000 0x01 0x00000000>,
-		      <0x00 0xc0000000 0x00 0xc0000000>;
+		reg = <0x00 0x00 0x00 0x00>;
 	};
 
 	chosen {
@@ -57,9 +57,9 @@
 
 		/* 复用 ABL 摆好的 splash 帧缓冲, 靠 simpledrm 把早期 dmesg/panic 打到屏幕上;
 		 * 不涉及面板/DSI 驱动 */
-		framebuffer0: framebuffer@e1000000 {
+		framebuffer0: framebuffer@ea600000 {
 			compatible = "simple-framebuffer";
-			reg = <0 0xe1000000 0 (1440 * 3200 * 4)>;
+			reg = <0 0xea600000 0 (1440 * 3200 * 4)>;
 			width = <1440>;
 			height = <3200>;
 			stride = <(1440 * 4)>;
@@ -86,9 +86,9 @@
 
 
 	reserved-memory {
-		/* venus 的 ABL splash 区 */
-		cont_splash_mem: memory@e1000000 {
-			reg = <0 0xe1000000 0 0x2300000>;
+		/* venus 的 ABL splash 区(取自手机真实 DT: splash_region 0xea600000 +0x2300000) */
+		cont_splash_mem: memory@ea600000 {
+			reg = <0 0xea600000 0 0x2300000>;
 			no-map;
 		};
 
@@ -153,7 +153,14 @@
 		};
 
 		removed_mem: memory@d8800000 {
-			reg = <0 0xd8800000 0 0x8800000>;
+			/* 手机真实 DT: removed_region 0xd8800000 +0xa000000 (旧值 0x8800000 偏小,
+			 * 少 reserve 的 24MB 会被内核当普通 RAM 用) */
+			reg = <0 0xd8800000 0 0xa000000>;
+			no-map;
+		};
+
+		dfps_data_mem: memory@ec900000 {
+			reg = <0 0xec900000 0 0x100000>;
 			no-map;
 		};
 
@@ -1191,6 +1198,12 @@
 		drive-strength = <6>;
 		bias-disable;
 	};
+};
+
+/* 手机真实 DT: xbl_aop_region@80600000 +0x260000。mainline sm8350.dtsi 里写的是
+ * 0x80700000 +0x160000, 少了下面这 1MB, 内核会把它当可用内存分配出去。 */
+&xbl_aop_mem {
+	reg = <0x0 0x80600000 0x0 0x260000>;
 };
 
 &ufs_mem_hc {

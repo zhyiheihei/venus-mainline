@@ -8,7 +8,29 @@
 > 但**铁律是: 任何叙述都可用一条命令重新验证(验证命令已附), 验证优先于信任叙述**。
 > 对无验证命令支撑的推断(标 🔶), 当作假设而非事实。
 
-## 最新状态（2026-10-26 晚间更新，覆盖下面旧叙述）
+## 最新状态（2026-11-09：换机后首次跑起 NixOS）
+
+**环境全换了**：Linux 主机重装、Windows 刷机机换成 `molis@192.168.0.143`（MOLI-VM）、
+手机换成新购 12+256（已解锁，hw-revision 20001）。仓库资产（DTS/initramfs/配置/脚本/docs）全部还在。
+
+**当前跑通的**：NixOS 25.05 从 boot_b 引导，`ssh root@<LAN_PHONE_IP>` 可用，
+WiFi 稳定（50/50 包 0% loss，avg 6ms，power save 已关），
+`card1-DSI-1` connected/enabled/1440x3200，SDDM 自动登录 + Plasma Wayland 会话已启动。
+
+**三个已定位的新坑**（详见 docs/porting-notes.md 2026-11-09 条目）：
+
+1. **卡米标根因** = DTS 里的 `memory` 节点写死了旧 8GB 机的布局。手机真实 DT 里是
+   `reg = <0 0 0 0>` 占位，内存由 ABL 按实际 DDR 容量注入。改成占位后一次启动成功。
+2. **rootfs 的 `/nix/store` 必须 `root:root`**，否则 NetworkManager 以 "file has invalid owner"
+   跳过 wifi 插件，wlan0 有设备但拿不到地址。
+3. **WiFi 连上又掉** = ath11k 省电；NM 侧 `wifi.powersave=2` 关掉后稳定。
+
+**部署方式改成不刷镜像**：本地 build → `nix copy --to ssh://root@<LAN_PHONE_IP>` →
+`nix-env --set` + `switch-to-configuration switch`。
+
+---
+
+## 旧机（8GB，已退役）状态（2026-10-26 晚间更新）
 
 设备跑 **NixOS 25.05**（自建内核 7.2.6），从 boot_b 引导。
 

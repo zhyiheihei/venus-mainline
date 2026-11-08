@@ -34,13 +34,37 @@ docs/porting-notes.md         # 里程碑日志（每条结论附实测输出）
 docs/references.md            # 参考来源分类整理
 ```
 
-## 当前系统状态（2026-10-25）
+## 当前系统状态（2026-11-09，新机 12GB）
 
-- 设备跑 **NixOS 25.05**（自建内核 7.2.6 + venus.dtb + NixOS 官方 initrd），开机自动连 WiFi
-  （固定 IP <LAN_PHONE_IP> / MAC 02:11:22:3c:4d:5e）并起 sshd
+- 设备跑 **NixOS 25.05**（自建内核 7.2.6 + 修正后的 venus.dtb + NixOS 官方 initrd），
+  开机自动连 WiFi（SSID `moli-1004-backup`，静态 IP <LAN_PHONE_IP> / MAC 02:11:22:3c:4d:5e），
+  `ssh root@<LAN_PHONE_IP>` 可用（WiFi 稳定，无需拔插）
+- 显示：`card1-DSI-1` connected/enabled/1440x3200，SDDM 自动登录 venus，Plasma Wayland 会话启动
+- 串口：`venus-acm.service` 在 systemd 内重建 USB ACM gadget（`/dev/ttyGS0`），
+  configfs gadget 在 switch_root 后残留、但 UDC 绑定会在 systemd 起来时丢，故必须由服务重建
 - 启动参数必须带 `init=/nix/var/nix/profiles/system/init`（`--no-bootloader` 安装不建根上的 /init）
 - 内核更新**不需要 fastboot**：编译 → 打包 boot.img → `tools/vpush.sh` → 设备上 dd 到 `/dev/sde38` → reboot
 - 内核里所有启动链要用的驱动必须 `=y`（initramfs 阶段没有模块可加载）
+
+### 配置部署（首选，不刷镜像）
+
+```
+本地 nix build（用下面 NIX_CONFIG 限定 substituter，否则 cache.zhyi.xin 会让每个 path 等 60s）
+ → nix copy --no-check-sigs --to ssh://root@<LAN_PHONE_IP> <closure>
+ → ssh root@<LAN_PHONE_IP> 'nix-env -p /nix/var/nix/profiles/system --set <closure>
+     && <closure>/bin/switch-to-configuration switch'
+```
+
+### 三条硬约束（踩过的坑，别重犯）
+
+1. **DTS 的 `memory` 节点必须是全零占位** `reg = <0x00 0x00 0x00 0x00>`：
+   内存布局由 ABL 按实际 DDR 容量注入（手机真实 DT 就是这么写的）。写死旧 8GB 机的映射
+   在新机上直接卡米标。
+2. **rootfs 镜像的 `/nix/store` 必须是 `root:root`**：用普通用户 `cp -a` 灌根会让
+   NetworkManager 以 "file has invalid owner" 跳过 wifi 插件 → wlan0 起来但无地址。
+   构建时必须 `sudo chown -R 0:0 root` 并在挂载后复核。
+3. **不要从 initramfs 往 `/etc/systemd/system/` 写 unit**：NixOS activation 启动时重写该目录，
+   写入的 unit 会消失。加 unit 只能改配置再 switch。
 
 ## 刷机注意（补充）
 

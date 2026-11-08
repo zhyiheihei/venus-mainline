@@ -1424,3 +1424,151 @@ dmesg: "remote processor adsp is now up"，无告警刷屏
 DT 里启用 adsp，但 cmdline 加 `modprobe.blacklist=qcom_q6v5_pas,pmic_glink,qcom_battmgr`
 → 开机不进 ADSP → 运行时 `modprobe` 逐个加载并观察。这样即使崩溃重启，设备也会
 自动回到同一个（不带 ADSP 的）镜像，不需要用户按 fastboot。
+
+## 2026-11-08 换机（新 venus 12+256）+ 新 Windows 主机，首次刷写卡米标
+
+### 环境变动（本机重装过，ROM/内核缓存/MiFlash 全丢，等于从零重建）
+- 新刷机 Windows 主机：`molis@192.168.0.143`（MOLI-VM，Proxmox 虚机，Win 26200）。
+  - 默认没装 OpenSSH Server；`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`
+    + `Start-Service sshd` 后才通。
+  - 22 端口默认**超时（不是 refused）**：capability 自动建的防火墙规则只覆盖
+    Domain/Private，虚机网络被判为 Public。修法是一条 `-Profile Any` 的 22 入站规则。
+  - 公钥要放 `C:\ProgramData\ssh\administrators_authorized_keys`（管理员组的专用文件），
+    放 `~/.ssh/authorized_keys` 不生效。
+  - **SMB/NTLM 是死的**：`molis:...` 走 impacket `smbclient`/`wmiexec` 全部
+    `STATUS_LOGON_FAILURE`，匿名也失败 → 只能走 SSH。
+  - platform-tools 由官方 zip 装到 `C:\Users\molis\mi11\platform-tools`。
+- 手机：新机，已解锁，12+256（旧机是 8+256）。`fastboot getvar`：
+  `product:venus`、`unlocked:yes`、`secure:yes`、`hw-revision:20001`、`anti:1`、
+  `current-slot:a`、`userdata 0x38257FB000`、`boot_b 0xC000000`、`dtbo_b 0x1800000`、
+  `vendor_boot_b 0x6000000`、`max-download-size 805306368`、`variant:SM_ UFS`。
+
+### 本机侧重建（全部实测通过）
+- flake 的 `nixosConfigurations.venus` 原先指向 `hosts/venus`（早期空壳，kernelPackages 是占位），
+  改指向真正的 `nixos/configuration.nix`。
+- `nixos/hardware-configuration.nix` 原来只在设备上、没进 git；按原布局重写
+  （根 = userdata 上打 `-L nixos` 标签的 ext4）。
+- nixpkgs 用 **nixos-25.05 频道**（设备 PRETTY_NAME 就是 25.05）；仓库自带 pin 是 2026-09
+  unstable，`services.logind.extraConfig`/`services.journald.extraConfig` 已改名，直接 assert 失败。
+- 自建内核包补 `passthru.buildDTBs = false`（NixOS 的 `hardware.deviceTree.enable` 默认取它）。
+- 从 `nixos/kernel/Image` 里解出内嵌 .config（2959 项），在 7.2.6 源码树上 `olddefconfig` + `dtbs`
+  重编 DTB（89KB）。**注意**：`make <单个 dtb 路径>` 在 O= 外部构建时会拼成重复路径报
+  "没有规则可制作目标"，要用 `make dtbs`。
+- 系统闭包 `nixos-system-venus-25.05.20260102.ac62194`（7.5GiB）+ initrd
+  `initrd-linux-venus-7.2.6`（12MiB，含 msm/panel 模块）。
+- 装机镜像做法：`nix copy --to local?root=` 建 root 树（硬链接）→ **loop 挂载 + `cp -a`**
+  灌进 12GiB ext4 → `img2simg` 稀疏化。`mkfs.ext4 -d` 在 btrfs 上单线程灌 8.6GB 实测
+  ~90 分钟（CPU 打满），`cp -a` 只要 **46 秒**，以后一律走 loop + cp。
+- sparse 结构自检（避免 fastboot 报 "Requested download size is more than max allowed"）：
+  chunk_sz 单位是**块**不是字节，`total_sz = chunk_sz*blksz + 12`；实测 12273 RAW + 12315 FILL，
+  raw 8.26GiB，最大单 chunk 64MiB < 768MiB ✓。
+- 刷写日志：`boot_b` 27MB 0.68s、`dtbo_b` 24MB 0.6s、`userdata` sparse 12 片共 390s（全部 OKAY）。
+
+### 结果：卡米标（内核查不到、USB 完全不枚举）
+- 原厂 slot a（boot_a + dtbo_a 未动）**正常启动**：Windows 上出现
+  `USB\VID_18D1&PID_4E11`（原厂 adb），`adb devices` 能列设备；因 userdata 已被 ext4 覆盖，
+  MIUI 落到 **recovery / 连接小米助手 = sideload 模式**（`adb get-state` = `sideload`）。
+- 我们的 slot b：`dtbo_b` 写零 → 卡米标；`dtbo_b` 写进我们的 DTB（DTBO 格式，3 条
+  msm-id/rev 0x20001/board 0x10008）→ 仍卡米标；再把 DTB 塞进 v1 的 `--second` → 仍卡米标。
+- 卡米标时 USB 零枚举（无 adb/ACM/EDL），WiFi 也不通 → 内核在 initramfs 之前就死，
+  与 rootfs 无关。
+- **已知不匹配**：`kernel/venus/sm8350-xiaomi-venus.dts` 是 `tools/gen-venus-dts.py` 用**旧 8GB 机**
+  的 `/sys/firmware/fdt` 生成的，`memory@80000000` 写死 8GB 布局，`qcom,msm-id`/`qcom,board-id`
+  也是旧机值。新机 12GB，真值必须重新取。
+- 待办：恢复原厂 Android（清 data）→ 开 USB 调试 → `adb` dump `/proc/device-tree`
+  （memory/board-id/msm-id/UFS/USB/panel）→ 按真值修 DTS 后再刷。
+
+---
+
+## 2026-11-09 · 新机（12GB）跑起 NixOS：卡米标根因 = DTS 写死旧机内存布局
+
+### 根因（有实证，不是推测）
+
+旧 `kernel/venus/sm8350-xiaomi-venus.dts` 的 `memory@80000000` 是从**旧 8GB 机**的
+`/sys/firmware/fdt` 抄的：
+
+```
+reg = <0x00 0x80000000 0x00 0x39700000>,
+      <0x01 0x80000000 0x01 0x00000000>,
+      <0x00 0xc0000000 0x00 0xc0000000>;   // 合计 7.9 GiB
+```
+
+而**手机真实 DT 里这个节点是占位符**，内存布局由 ABL 启动时按实际 DDR 容量注入：
+
+- Android cmdline：`androidboot.dtb_idx=4 androidboot.dtbo_idx=46`
+- 用 EvoX 官方镜像反编译：`vendor_boot` 的 dtb#4（Lahaina V2.1 基础 DT）里
+  `memory { device_type="memory"; reg = <0 0 0 0>; }`；`dtbo` 的 #46（Venus overlay，
+  `/plugin/` 700 个 fragment）里**没有任何 memory 节点**。
+- 结论：新机 12GB 上按 8GB 映射跑，内核在 mm_init 阶段就死 → 卡米标 + USB 零枚举 + WiFi 不通。
+
+改成占位后（`reg = <0x00 0x00 0x00 0x00>`）**内核一次启动成功**（USB 出现
+`VID_18D1&PID_4EE1` ACM gadget，串口有输出）。
+
+### 逐项验证（5 处 DTS 差异，拆成 v0..v4 各编一份 DTB）
+
+用脚本把我们的 DTB 与手机真实 DT 的 reserved-memory 逐项比对，统计"欠 reserve / 多 reserve"：
+
+```
+变体                  改动                           欠 reserve  多 reserve
+v0  HEAD 基线         旧 8GB 布局                          4           9
+v1  +memory 占位      全零(ABL 填)                         4           9
+v2  +xbl_aop          0x80600000+0x260000                  3           8
+v3  +splash           0xea600000(fb + 保留区)              2           7
+v4  +removed +dfps    0xa000000 / 0xec900000               0           6
+```
+
+真值取自手机真实 DT：`xbl_aop_region@80600000 +0x260000`（mainline dtsi 写 0x80700000+0x160000，
+少 reserve 1MB）、`splash_region 0xea600000 +0x2300000`（我们原来的 0xe1000000 落在 removed 区里）、
+`removed_region@d8800000 +0xa000000`（我们少 24MB）、`dfps_data_region 0xec900000 +0x100000`。
+**只改 v1（memory 占位）内核就能起来**，其余 4 项是后续修正。
+
+### 第二个坑：rootfs 属主必须是 root:root
+
+镜像里 `/nix/store` 属主是 `zhyi:zhyi`（用普通用户 `cp -a` 灌根导致）→
+**NetworkManager 拒绝加载 wifi 插件**，wlan0 起来了但没人管它、拿不到地址：
+
+```
+NetworkManager[915]: <warn> plugin: skip invalid file
+  .../libnm-device-plugin-wifi.so: file has invalid owner (should be root)
+```
+
+修复：构建镜像时 `sudo chown -R 0:0 root` 再 `cp -a`，并在挂载后复核
+`ls -ld nix/store` = `root:root`、`find nix/store -maxdepth 1 -user 1000` 为空。
+
+### 第三个坑：WiFi 连上又掉 = ath11k 省电
+
+NM 默认 `wifi.powersave=3`（启用）+ 驱动默认省电 → 连上后掉包（ping 一半通一半不通）。
+修复：`environment.etc."NetworkManager/conf.d/99-venus-powersave.conf"` 写
+`[connection] wifi.powersave=2`。修复后实测：
+
+```
+50/50 包, 0% loss, rtt min/avg/max/mdev = 2.512/6.112/108.755/14.738 ms
+scp 20MB 文件校验一致；iw dev wlan0 get power_save = off
+iw dev wlan0 link: 5300 MHz, signal -14 dBm
+```
+
+### 部署流程（以后不再刷镜像）
+
+```
+本地 nix build → nix copy --no-check-sigs --to ssh://root@192.168.0.150 <closure>
+ssh root@192.168.0.150 'nix-env -p /nix/var/nix/profiles/system --set <closure>
+                        && <closure>/bin/switch-to-configuration switch'
+```
+
+实测增量只有 `system-units / etc / toplevel` 几条路径，几十秒完成。
+
+### 环境坑（都会拖慢构建）
+
+- `cache.zhyi.xin` 已死但仍在本机 substituters 列表里 → 每个 store path 等 60s 超时。
+  构建时用 `NIX_CONFIG="substituters = http://192.168.0.56:13851 https://cache.nixos.org
+  https://cache.lantian.pub/lantian https://lab.opi5p.zhyi.xin/nix-static-file-cache"` 限定。
+- PVE 直通（MOLI-VM）：手机 fastboot↔system 重新枚举时设备会被宿主抢走，Windows 侧消失，**拔插数据线**恢复。
+- 从 initramfs 往 `/etc/systemd/system/` 写 unit **无效**：NixOS activation 启动时会重写该目录
+  （实测写入的文件在系统起来后消失）。要加 unit 只能写进配置再 switch。
+
+### 当前状态
+
+- 系统：NixOS 25.05，内核 7.2.6 + 修正后的 venus.dtb，`root@192.168.0.150` 可 SSH（WiFi 稳定）
+- 显示：`card1-DSI-1` = connected/enabled/1440x3200，SDDM 自动登录 venus，Plasma Wayland 会话已启动
+- 串口：`venus-acm.service` 在 systemd 里重建 ACM gadget（`/dev/ttyGS0` 存在），
+  Windows 侧需拔插一次数据线才会重新枚举出 COM

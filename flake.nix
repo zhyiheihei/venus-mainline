@@ -49,7 +49,7 @@
         nixosConfigurations.venus = inputs.nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
           modules = [
-            ./hosts/venus
+            ./nixos/configuration.nix
           ];
         };
       };

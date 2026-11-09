@@ -7,7 +7,8 @@
 - 刷机操作走 Windows 主机(ssh <windows-user>@<LAN_WINDOWS_IP>),NixOS 侧 fastboot 大传输必断;**每次让用户操作前先声明需要的手机状态**
 - ROM 包(fastboot 完整包/OTA zip)与官方镜像常备 ~/mi11-work/,官方恢复路径已在 2026-10-23 实证(EvoX First Time Install,见 porting-notes)
 - 厂商固件文件不进 git,只落本机 `/lib/firmware`
-- flake 用 flake-parts;NixOS 配置保持 headless 最小集,图形栈等亮屏后再说
+- flake 用 flake-parts；导出 `nixosModules.venus`（板级模块）和 `nixos/kernel.nix`（内核 recipe）两个口子，
+  nixos-config 等外部仓库当“上游板级支持”引用它们（对标那边的 `inputs.nixos-hardware` + lt-rpi4）
 - 每个 milestone 完成后在 docs/porting-notes.md 追加日志,引用实际输出为证;**日志读取走 misc 分区通道(init 每 15s 写 dmesg 到 misc 偏移 4KB 起),recovery sideload 读出**
 - git 提交用 conventional commits,中文说明原因
 
@@ -19,7 +20,10 @@ kernel/venus/
   star-reference.dts          # Mi 11 Ultra 主线 DTS 存档（参考源）
   initramfs/init              # initramfs 的 /init（双系统引导：NixOS 优先，Alpine 兜底）
 nixos/
-  configuration.nix           # NixOS 配置（WiFi/SSH/串口/固件/venus 专有 systemd 服务）
+  venus-hardware.nix          # 板级支持模块（内核包/initrd/固件/WiFi 上电+PCIe 重训/串口/背光/回滚/休眠屏蔽），导出为 nixosModules.venus
+  kernel.nix                  # 自建内核 recipe（artifacts 可参数化，供外部仓库接进自己的 kernelPackages）
+  kmods-package.nix           # 内核模块按 lib/modules/7.2.6 标准布局打包
+  configuration.nix           # 独立装机的薄壳（网络/SSH/用户/桌面/日志），imports ./venus-hardware.nix
   hardware-configuration.nix  # 根 = userdata 上的 ext4(LABEL=nixos)，noatime，无 swap
 tools/
   gen-venus-dts.py            # 从 star 参考生成 venus DTS（--stage 1|2 [--no-fb]）

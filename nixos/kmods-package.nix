@@ -5,11 +5,10 @@
  *   - boot.initrd.kernelModules 里的模块会被打进 initrd（早期点亮面板）
  * 内核镜像 Image 另由 tools/make-bootimg.sh 打进 boot.img。
  */
-{ pkgs, lib, ... }:
+{ pkgs, lib, artifacts ? ./kernel, ... }:
 
 let
   version = "7.2.6";
-  artifacts = ./kernel;
 in
 pkgs.runCommandLocal "linux-venus-${version}" { } ''
   install -Dm644 ${artifacts}/Image $out/Image

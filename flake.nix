@@ -46,6 +46,7 @@
         };
 
       flake = {
+        nixosModules.venus = ./nixos/venus-hardware.nix;
         nixosConfigurations.venus = inputs.nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
           modules = [

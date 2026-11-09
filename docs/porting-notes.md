@@ -1999,3 +1999,46 @@ display-manager/graphical.target` 全 active，触摸在，DSI-1 connected，无
 1. 设备 DTB 与仓库 DTS 对齐（仓库已含 `wlan_en`/`bt_en` 的 pinctrl）
 2. 重建内核可用（需要串口；ath11k 的 WCN6851 路径是最后一个已知未知）
 3. OTG 键鼠与音量下键（都在等第 2 条）
+
+## 2026-11-09 深夜 · 抽出板级模块，独立装机配置改成薄壳（供 nixos-config 复用）
+
+目的：让本仓库当"上游板级支持"（对标 nixos-config 里 lt-rpi4 用的 `inputs.nixos-hardware`），
+nixos-config 只留薄适配面；本仓库继续独立迭代。全部是搬家，没有改行为。
+
+改动：
+- 新增 `nixos/venus-hardware.nix`：内核包 / initrd 模块 / 固件 / cs35l41 黑名单 / NM 省电配置 /
+  串口 ACM / WiFi 上电+PCIe 重训+net-watch+回滚 / 休眠屏蔽 / PPD 关闭 / 背光+powermanagement /
+  硬件图形，收口成板级模块，由 flake 导出 `nixosModules.venus`。
+  `boot.kernelPackages` 从 `lib.mkForce` 改成 `lib.mkDefault`，留出"调用方自带 kernelPackages"的口子。
+- 新增 `nixos/kernel.nix`：自建内核 recipe（原 configuration.nix 里那段 `overrideAttrs`），
+  `artifacts` 参数化，默认仍取 `nixos/kernel/`；`kmods-package.nix` 同步接受该参数。
+- `nixos/configuration.nix`：只留独立装机部分（hostName / NetworkManager profile / SSH / 用户 /
+  桌面 / 日志 / HiDPI 等），imports 加 `./venus-hardware.nix`。
+
+验证（纯搬家用求值证明）：
+
+```bash
+nix eval --raw --override-input nixpkgs 'https://channels.nixos.org/nixos-25.05/nixexprs.tar.xz' \
+  "path:$BUILD_ROOT#nixosConfigurations.venus.config.system.build.toplevel.drvPath"
+# 重构前 = 重构后 = /nix/store/rky3bwgmrvfi2hl12m07ywz87ji7i2l1-nixos-system-venus-25.05.20260102.ac62194.drv
+# config.boot.kernelPackages.kernel.version = 7.2.6
+```
+
+注意：直接用 `.#` 求值会失败——`nixos/firmware`、`nixos/kernel` 在 .gitignore 里，
+git 类型 flake 看不到它们（这正是 tools/install-venus.sh 走 `path:$BUILD_ROOT` 的原因）。
+
+顺带查到的两处漂移（先记录，未处理）：
+
+1. **本机 gitignore 的内核产物不是设备上跑的那份**：`nixos/kernel/Image` md5
+   `8b2924094ca196c92fcba2823c8e6868`，v0.1.0 设备/发布是 `b08a5eb2628eb8ff6c1cdf0b2eca84ca`
+   （同尺寸 43,325,952）。modules 树也不同（本地多 hid/、usb/storage/、ucsi_glink.ko，
+   少 panel-venus-k2-test.ko，msm.ko 与 qcom_battmgr.ko 内容不同），
+   `diff -rq nixos/kernel/mod /nix/store/xjx9p3abh9262ppy6x06xqa9ln24f2rl-linux-venus-7.2.6-modules/lib/modules/7.2.6`。
+   设备那份还能从本机 store 找回：`/nix/store/cgdqj3251kmpjbqvzgh7lyjn5864lkci-linux-venus-7.2.6`。
+2. **`/etc/venus-wifi-setup` 文本与设备闭包不一致**：设备是
+   `/nix/store/agkxx4w2s8ddlkcs8y72xzllyd4nq94g-etc-venus-wifi-setup`，当前树求值出
+   `3wiiqmrw42k3kfqbbxpag62kz985fnqb-etc-venus-wifi-setup`。其余 venus 专有 unit
+   （venus-acm / venus-brightness / venus-net-watch / venus-wifi-power）与 bl-toggle 脚本逐路径一致。
+
+下一步：定"板级产物从哪来"（进 attic/静态文件缓存，还是保持本机 `path:` 输入），
+再把 nixos-config 的 `hosts/venus` 接上（server 角色）。

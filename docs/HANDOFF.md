@@ -9,24 +9,34 @@
 > 对无验证命令支撑的推断(标 🔶), 当作假设而非事实。
 
 ## 最新状态（2026-11-09：换机后首次跑起 NixOS）
+（2026-11-09 收工版）
 
-**环境全换了**：Linux 主机重装、Windows 刷机机换成 `molis@192.168.0.143`（MOLI-VM）、
-手机换成新购 12+256（已解锁，hw-revision 20001）。仓库资产（DTS/initramfs/配置/脚本/docs）全部还在。
+**环境**：Linux 主机重装、Windows 刷机机 `molis@192.168.0.143`（MOLI-VM）、
+手机换成新购 12+256（已解锁）。仓库资产全部还在。
 
-**当前跑通的**：NixOS 25.05 从 boot_b 引导，`ssh root@<LAN_PHONE_IP>` 可用，
-WiFi 稳定（50/50 包 0% loss，avg 6ms，power save 已关），
-`card1-DSI-1` connected/enabled/1440x3200，SDDM 自动登录 + Plasma Wayland 会话已启动。
+**设备当前状态（可用）**：NixOS 25.05，内核 `7.2.6 #52 (Oct 28)`，
+`ssh root@<LAN_PHONE_IP>` 可用，WiFi 稳定（power save 已关），
+`card1-DSI-1` connected + Plasma Wayland 会话 + 触摸在，无 failed 单元。
+profile → `9nv5kxlxzalswnhybszpmxxvg7dgm31g`。
 
-**三个已定位的新坑**（详见 docs/porting-notes.md 2026-11-09 条目）：
+**接手必读的三块知识**（细节见 docs/porting-notes.md 与 docs/audit-sm8350.md）：
 
-1. **卡米标根因** = DTS 里的 `memory` 节点写死了旧 8GB 机的布局。手机真实 DT 里是
-   `reg = <0 0 0 0>` 占位，内存由 ABL 按实际 DDR 容量注入。改成占位后一次启动成功。
-2. **rootfs 的 `/nix/store` 必须 `root:root`**，否则 NetworkManager 以 "file has invalid owner"
-   跳过 wifi 插件，wlan0 有设备但拿不到地址。
-3. **WiFi 连上又掉** = ath11k 省电；NM 侧 `wifi.powersave=2` 关掉后稳定。
+1. **DTS 里 `memory` 必须是全零占位**，交 ABL 按实际 DDR 注入；写死旧 8GB 布局会卡米标。
+   reserved-memory 有 9 处必须按手机真实 DT 覆盖主线值（xbl_aop/adsp/slpi/cdsp/ipa/
+   spss/modem/removed/splash+dfps）。
+2. **WiFi 供电是项目唯一不标准的地方**：五路 `regulator-output` + 用户态开电，
+   依赖 `apply-kernel-patches.sh` 里的 `userspace-consumer` 补丁（非独占 get / 容忍
+   is_enabled）和 gpio64/65 的 pinctrl。两者缺一，WiFi 全哑且 PCIe 端点不枚举。
+3. **重建内核仍不可用**：这台机的 WiFi 是 WCN6851(hw1.1)，主线只认 hw2.0/2.1；
+   补丁已写进脚本，但新版本死在 early boot（无 journal / 无 pstore）。
+   要往前推进**必须有串口**——USB 口目前在任何主机上都不枚举。
 
-**部署方式改成不刷镜像**：本地 build → `nix copy --to ssh://root@<LAN_PHONE_IP>` →
-`nix-env --set` + `switch-to-configuration switch`。
+**自愈**：`venus-wifi-fallback` 在开机 90s 没 WiFi 时把现场写 `/var/log/venus-bootfail.log`，
+然后 dd `/root/boot_b-good.img` 回 boot_b 并重启（≤5 次）。刷实验内核前确认这两样在。
+
+**部署（不刷镜像）**：`tools/install-venus.sh deploy`（本地 build → nix copy → switch）。
+**改内核**：`tools/build-kernel.sh`（基线=设备 /proc/config.gz）→ `tools/make-bootimg.sh`
+→ dd `/dev/sde38`（boot_b）。
 
 ---
 

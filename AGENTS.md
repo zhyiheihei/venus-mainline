@@ -11,7 +11,7 @@
 - 每个 milestone 完成后在 docs/porting-notes.md 追加日志,引用实际输出为证;**日志读取走 misc 分区通道(init 每 15s 写 dmesg 到 misc 偏移 4KB 起),recovery sideload 读出**
 - git 提交用 conventional commits,中文说明原因
 
-## 仓库结构（2026-10-25 更新）
+## 仓库结构（2026-11-09 更新）
 
 ```
 kernel/venus/
@@ -20,10 +20,14 @@ kernel/venus/
   initramfs/init              # initramfs 的 /init（双系统引导：NixOS 优先，Alpine 兜底）
 nixos/
   configuration.nix           # NixOS 配置（WiFi/SSH/串口/固件/venus 专有 systemd 服务）
-  firmware/                   # 厂商固件（**不进 git**，用 tools/extract-firmware.sh 生成）
+  hardware-configuration.nix  # 根 = userdata 上的 ext4(LABEL=nixos)，noatime，无 swap
 tools/
   gen-venus-dts.py            # 从 star 参考生成 venus DTS（--stage 1|2 [--no-fb]）
   extract-firmware.sh         # 从本机 ~/mi11-work 提取固件到 nixos/firmware/
+  apply-kernel-patches.sh     # 内核本地补丁（面板/触摸/pcie 重训/regulator/ath11k/vsync/battmgr）+ 末尾自检
+  build-kernel.sh             # 编内核：基线取设备 /proc/config.gz → 打补丁 → Image+modules+dtbs → pack-kernel.sh
+  pack-kernel.sh              # 把 Image/modules/DTB 摆进 nixos/kernel（NixOS 内核包直接吃这个布局）
+  make-bootimg.sh             # 打 boot.img（header v1 + Image.gz + venus.dtb + 注入 preinit 的 initrd）
   vcmd.sh / vsh.sh            # 通过 WiFi ssh 在手机上执行/交互
   vpush.sh / vpull.sh         # tar over ssh 传文件（dropbear 没有 sftp，别用新 scp）
   wserial.sh                  # 走 Windows COM3 的命令通道（手机跑我们内核时的串口 shell）
@@ -33,7 +37,36 @@ tools/
   update-kernel.sh            # 换内核（dd 到 boot_b）
 docs/porting-notes.md         # 里程碑日志（每条结论附实测输出）
 docs/references.md            # 参考来源分类整理
+docs/audit-sm8350.md          # 配置审核：与主线 sm8350 各板 + 手机真实 DT 的逐项对照
+docs/HANDOFF.md               # 接手必读：设备现状 / 已证事实 / 坑位清单 / 下一步
 ```
+
+## 未完成项（2026-11-09 收工时的状态）
+
+按"需要动内核"和"不需要"分开，前者现在一律搁置：
+
+| 项目 | 状态 | 前置条件 |
+|---|---|---|
+| USB OTG 接键鼠 | DTS/配置已按 sm8350-hdk 写好并编进内核，**未验证通过** | 重建内核可用（见下） |
+| 红外发射 | 驱动+DTB 就绪，**按用户决定放弃** | — |
+| 加速度/光距传感器 | 厂商 overlay 里没有节点，来源未确定 | 需要厂商 sensor 配置 |
+| 基带（modem） | `&mpss` 关闭，未开始 | — |
+| 休眠 | `s2idle` 会直接复位，未查 | 需要串口抓 PM 阶段日志 |
+| 蓝牙 | 可用（hci0 UP、能扫到 8 个设备） | — |
+| 重建内核 | **拦路虎**：重建后 ath11k 认不出 WCN6851(hw1.1)，补丁已写但新版本死在 early boot | **串口**（USB 口目前任何主机都不枚举） |
+
+### 关键环境坑（会重复咬人）
+
+- 本机 `/` 与 `/tmp` 是 tmpfs，只有 `/home` 在 nvme 上：别把 12GiB 镜像写到 tmpfs（会整机 OOM）。
+- `cache.zhyi.xin` 已死：构建要用 `NIX_CONFIG` 限定 substituters，否则每个 path 等 60s。
+- gpg-agent 死掉会让**所有** ssh 卡在等 banner、`git commit` 也卡：判别法是
+  `env -u SSH_AUTH_SOCK ssh -o IdentityAgent=none <host> true`。
+- PVE 直通：手机重新枚举时 Windows 可能看不到设备，先跑
+  `C:\Windows\System32\pnputil.exe /scan-devices`，不行再拔插。
+- `venus-wifi-fallback` 服务会在开机 90s 没 WiFi 时自动 dd 回 `/root/boot_b-good.img` 并重启
+  （最多 5 次），并写 `/var/log/venus-bootfail.log`。刷实验内核前先确认这个文件在、
+  `/root/boot_b-good.img` 是当前工作版。
+
 
 ## 当前系统状态（2026-11-09，新机 12GB）
 

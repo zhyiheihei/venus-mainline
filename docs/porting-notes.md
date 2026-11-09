@@ -1610,3 +1610,59 @@ vsync 时钟存在且被 DPU 持有（19.2MHz），我们的 DTS 里也把面板
 - 部署：`nix copy --to ssh://root@192.168.0.150` + `nix-env --set` + `switch-to-configuration switch`
 - 内核更新：打包 boot.img → `ssh ... 'dd of=/dev/sde38'`（boot_b，192MB）→ reboot，**不需要 fastboot**
 - 串口：`venus-acm.service` 重建 gadget；Windows 侧要拔插数据线才会重新枚举出 COM
+
+## 2026-11-09 · 蓝牙 / GPU / 休眠 三项实测
+
+### 蓝牙：可用（新机上其实自己就好了）
+
+之前 diag 镜像里看到 `qca/wcnhpbtfw10.tlv` 加载失败，那是 diag 环境把
+`firmware_class.path` 指到空的 `/venus-fw` 导致的，**正常启动没有这个问题**：
+
+```
+Bluetooth: hci0: setting up wcn6855
+Bluetooth: hci0: QCA ROM Version  :0x00000100        ← rom_ver=0x10
+Bluetooth: hci0: QCA Downloading qca/wcnhpbtfw10.tlv
+  Direct firmware load for qca/wcnhpbtfw10.tlv failed with error -2   ← 没带 wcn 前缀的副本
+Bluetooth: hci0: QCA Downloading qca/hpbtfw10.tlv   ← 驱动回退名称，命中 .zst 解压
+Bluetooth: hci0: QCA Downloading qca/wcnhpnv10.bin
+Bluetooth: hci0: QCA setup on UART is completed
+Bluetooth: hci0: HFP non-HCI data transport is supported
+```
+
+`hciconfig -a` / `bluetoothctl show`：
+
+```
+hci0:  BD Address: 02:11:22:3C:4D:5F  ACL MTU: 1024:7  SCO MTU: 240:4
+       UP RUNNING  RX bytes:2486 errors:0  TX bytes:417555 errors:0
+bluetoothctl: Powered yes, Manufacturer 0x001d, Version 0x0b, Name venus
+```
+
+`bluetoothctl scan on` 15 秒扫到 8 个设备（含 LYWSD03MMC 温湿度计等）→ 适配器+扫描链路通。
+注意 `btqca.c` 对 WCN6855 是先试 `qca/wcnhpbtfw%02x.tlv` 再回退 `qca/hpbtfw%02x.tlv`，
+所以只要固件目录里有 `hpbtfw10.tlv` 就够，不必造 `wcn` 前缀的副本。
+
+### GPU：硬件加速正常（Adreno 660）
+
+```
+vulkaninfo --summary   → deviceName = Turnip Adreno (TM) 660, driverName = turnip Mesa driver
+eglinfo                → OpenGL core profile vendor: freedreno / renderer: FD660
+glmark2-es2-wayland --size 1440x3200 → glmark2 Score: 904
+```
+
+对照旧机（2026-10-26 记录 413@1440x3200），这台机翻了一倍多。
+
+### 休眠：不可用（会导致复位）
+
+```
+/sys/power/state     = freeze mem
+/sys/power/mem_sleep = s2idle [deep]
+
+rtcwake -m freeze -s 15
+  → SSH 连接被 reset（正常，设备进睡眠）
+  → 15 秒后回来时 uptime = 0:00、journalctl 出现新 boot id、suspend_stats/success 仍是 0
+```
+
+即：进入 s2idle 后没有走完 resume，而是**直接复位**（PMIC/watchdog 拉回）。
+上一 boot 的内核日志里也没有 PM: suspend 相关行，说明挂在非常早的阶段。
+结论：**休眠先不用**，要用得先查 `mem_sleep` 走 deep 还是 s2idle、以及 PDC/唤醒源配置
+（`/proc/acpi/wakeup` 是空的，qcom-pdc 驱动没挂 wakeup 源）。这条未开始。

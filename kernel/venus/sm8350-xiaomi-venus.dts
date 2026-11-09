@@ -1234,12 +1234,25 @@
 	status = "okay";
 };
 
+/*
+ * USB-C 口做 OTG：抄上游同 SoC 的 sm8350-hdk.dts（官方参考，同一 PMIC 平台）
+ *   &usb_1_dwc3 { dr_mode = "otg"; usb-role-switch; };
+ *   &usb_1_dwc3_hs { remote-endpoint = <&pmic_glink_hs_in>; };
+ * 角色切换走 pmic_glink 的 "usb" aux 设备 → ucsi_glink → typec → dwc3。
+ * 注意：默认必须是 peripheral，否则 CC 检测失败时会连 ACM 串口一起丢。
+ */
 &usb_1_dwc3 {
-	dr_mode = "peripheral";
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
 	maximum-speed = "high-speed";
 	/* Remove USB3 phy */
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
+};
+
+&usb_1_dwc3_hs {
+	remote-endpoint = <&pmic_glink_hs_in>;
 };
 
 
@@ -1509,8 +1522,29 @@
 / {
 	pmic-glink {
 		compatible = "qcom,sm8350-pmic-glink", "qcom,pmic-glink";
-	#address-cells = <1>;
-	#size-cells = <0>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* 与 sm8350-hdk.dts 一致：Type-C 连接器，数据/供电角色都是 dual */
+		connector@0 {
+			compatible = "usb-c-connector";
+			reg = <0>;
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					pmic_glink_hs_in: endpoint {
+						remote-endpoint = <&usb_1_dwc3_hs>;
+					};
+				};
+			};
+		};
 	};
 };
 

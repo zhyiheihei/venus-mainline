@@ -60,7 +60,10 @@ echo "== 应用 config 项"
   -e PSTORE -e PSTORE_RAM \
   -e DEVTMPFS -e DEVTMPFS_MOUNT \
   -e BLK_DEV_INITRD -e RD_GZIP \
-  -e RC_CORE -e RC_DEVICES -e LIRC -e IR_SPI \
+  `# --- USB OTG 接键鼠：HID 子系统 + pmic-glink 角色切换（对齐 sm8350-hdk）---` \
+  -e HID_SUPPORT -e USB_ROLE_SWITCH \
+  -m HID -m HID_GENERIC -m USB_HID -m USB_STORAGE \
+  -m UCSI_PMIC_GLINK -m TYPEC_UCSI \
   -e INPUT_EVDEV \
   --set-str CONFIG_INITRAMFS_SOURCE "$IR"
 make -C "$SRC" O="$OUT" ARCH=$ARCH olddefconfig

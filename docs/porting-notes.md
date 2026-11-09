@@ -1843,3 +1843,73 @@ sn-nci@28 { compatible="qcom,sn-nci"; reg=<0x28>; irq=gpio0x57; ven=0x3e; firm=0
    失败才做一次 unbind/bind，并且**最后一次必须把 `1c00000.pcie` 绑回去**（现在是失败后留空）
 2. 再把红外配置改为 `IR_SPI=m`（模块），把 builtin Image 的变化降到最小，重测
 3. 每次只改一项；验证标准写死：`lspci | grep 17cb:1103` 有端点 + `wlan0` 拿地址 + `ls /sys/class/rc`
+
+## 2026-11-09 · USB OTG（接键鼠）尝试与同一个内核侧拦路虎
+
+### 实现（全部照抄上游，不是自创）
+
+参考 **`arch/arm64/boot/dts/qcom/sm8350-hdk.dts`**（同 SoC 官方参考，就在我们源码树里）：
+
+```
+&usb_1_dwc3 { dr_mode = "otg"; usb-role-switch; };
+&usb_1_dwc3_hs { remote-endpoint = <&pmic_glink_hs_in>; };
+pmic-glink { connector@0 { compatible="usb-c-connector"; power-role="dual"; data-role="dual";
+              ports { port@0 { pmic_glink_hs_in: endpoint { remote-endpoint=<&usb_1_dwc3_hs>; }; }; }; }; };
+```
+
+我们的 DTS 改动加了 `role-switch-default-mode = "peripheral"`（比 HDK 多这一项）：
+默认留在 device 模式，只有 CC 检测到主机/设备才切，避免一改就把 ACM 串口（唯一诊断通道）丢掉。
+
+内核配置（`tools/build-kernel.sh`，以设备 `/proc/config.gz` 为基线）：
+
+```
+-e HID_SUPPORT -e USB_ROLE_SWITCH            # 只能是 builtin 的两项
+-m HID -m HID_GENERIC -m USB_HID -m USB_STORAGE
+-m UCSI_PMIC_GLINK -m TYPEC_UCSI             # 角色切换：pmic_glink → ucsi_glink → typec → dwc3
+```
+
+注意设备基线里 **`# CONFIG_HID_SUPPORT is not set`** —— 也就是说即使 USB 口能当 host，
+键鼠也不会被识别；这一项必须开。
+
+### 结果：和红外一样死在 PCIe 上
+
+刷入后（Image 43,325,952 字节，boot.img 34,260,992，md5 feb3e683…）重启：WiFi 全哑。
+上一个 boot 的内核日志显示 PCIe 被反复重训但端点始终不出现：
+
+```
+20:01:48 qcom-pcie 1c00000.pcie: PCI host bridge to bus 0000:00
+20:01:55 qcom-pcie 1c00000.pcie: PCI host bridge to bus 0000:00   ← 重训 1
+20:02:08 ...                                                      ← 重训 2
+20:02:20 ...                                                      ← 重训 3   （一直没有 17cb:1103）
+```
+
+对照"好"的启动（旧内核，当前 boot）：
+
+```
+20:09:04 ... Device not found / PCI host bridge to bus 0000:00
+20:09:11 qcom-pcie 1c00000.pcie: Unbalanced pm_runtime_enable!      ← 我们的 remove 补丁在动
+          …随后 17cb:1103 出现、ath11k 起来、wlan0 拿到地址
+```
+
+即：**同一条 unbind/bind 重训路径，旧内核能带起链路，重建的内核带不起来。**
+
+### 现在的定性
+
+- **不是 DTB**：`boot-testA`（旧内核 Image + 新 DTB + 旧 initrd）验证过，WiFi 正常。
+- **不是配置差异**：新配置与设备 `device.config` 的差异只剩 HID/UCSI/HID_SUPPORT/USB_ROLE_SWITCH 这几项；
+  PCIe/WiFi 链路相关的 `PCIE_QCOM=y / PHY_QCOM_QMP=y / ATH11K=y / ATH11K_PCI=y` 完全一致。
+- **不是补丁没打**：新源码树里 `pcie-qcom.c` 的 `qcom_pcie_remove` + 去掉 `suppress_bind_attrs` 确认在位。
+- 结论：**重建内核这件事本身**会让 PCIe 链路重训失效（两次独立重建各复现一次），
+  在没查清之前，任何内核改动（红外、OTG、传感器、快充）都等于不可用。
+
+### 已处置
+
+`boot_b` 刷回工作版备份（`boot_b-backup-before-ir.img`），当前状态：内核 #52、
+`wlan0` + 192.168.0.150、power save off、触摸/显示/六个服务全正常。
+设备内另存 `/root/boot_b-good.img`（同内容，供无网络时就地 dd 回滚）。
+
+### 下一步只有两条路
+
+1. **插数据线走串口**（不用 fastboot）抓一次"重建内核"启动的 PCIe/PHY 完整日志，
+   和旧内核的逐行对比 —— 这是唯一能把这条拦路虎定位下来的办法，解开它后面所有内核工作才可能
+2. 放弃所有需要改内核的适配项，只留"改配置/用户态"能做的事

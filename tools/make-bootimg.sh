@@ -137,8 +137,8 @@ echo "== mkbootimg =="
 gzip -9 -c "$KERNEL_IMAGE" > "$work/Image.gz"
 cat "$work/Image.gz" "$DTB" > "$work/Image.gz-dtb"
 
-cmdline="firmware_class.path=/venus-fw console=tty0 console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init boot.shell_on_fail \
-net.ifnames=0 loglevel=7 firmware_class.path=/run/current-system/firmware \
+cmdline="firmware_class.path=/venus-fw console=tty0 console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init \
+net.ifnames=0 loglevel=7 \
 regulator_ignore_unused pd_ignore_unused clk_ignore_unused $extra"
 
 PYTHONPATH=$HOME/.cache/mkbootimg python3 "$HOME/.cache/mkbootimg/mkbootimg.py" \

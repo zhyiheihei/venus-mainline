@@ -6,7 +6,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 build=${1:-$HOME/.cache/venus-kernel/linux-build}
 out=$root/nixos/kernel
 
-rm -rf "$out"; mkdir -p "$out/mod"
+chmod -R u+w "$out" 2>/dev/null || true; rm -rf "$out"; mkdir -p "$out/mod"
 install -m644 "$build/arch/arm64/boot/Image" "$out/Image"
 for f in modules.order modules.builtin modules.builtin.modinfo; do
   [ -f "$build/$f" ] && install -m644 "$build/$f" "$out/$f"

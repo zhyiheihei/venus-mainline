@@ -1731,3 +1731,64 @@ boot.blacklistedKernelModules = [ "snd_soc_cs35l41" "snd_soc_cs35l41_i2c" "snd_s
 
 判别方法：`env -u SSH_AUTH_SOCK ssh -o IdentityAgent=none root@<host> true` —— 立刻通就是它。
 本次实际用的就是这条。以后遇到"ping 通、SSH 不出 banner"，**先排除本机 agent**，再怀疑对端。
+
+## 2026-11-09 · 红外发射适配（进行中，卡在设备无响应）
+
+### 硬件取证（全部来自 vendor overlay，不碰手机）
+
+反编译 `dtbo.img` 的 Venus 条目（#46，380,100 字节，`/plugin/` overlay）后：
+
+```
+fragment@113 → target = <&qupv3_se1_spi>            → 上游 spi@984000 = spi1
+    ir-spi@0 { compatible="ir-spi-led"; reg=<0>;
+               spi-max-frequency=<0x124f800>; status="ok" }
+fragment@115 → target = <&qupv3_se6_i2c>            → 上游 i2c@998000 = i2c6
+    aw8697_haptic@5A { compatible="awinic,aw8697_haptic"; reg=<0x5a>;
+                       reset-gpio=<&tlmm 0x9b>; irq-gpio=<&tlmm 0x77>; ... }
+sn-nci@28 { compatible="qcom,sn-nci"; reg=<0x28>; irq=gpio0x57; ven=0x3e; firm=0x56; clkreq=0x3f }
+```
+
+非 qcom 的 compatible 全集只有：`awinic,aw8697_haptic`、`cirrus,cs35l41`、`goodix,fingerprint`、
+`ir-spi-led`、`xiaomi-touch`、`linux,extcon-usb-gpio`、`modem,md-testing-mode`。
+**加速度计/光距传感器在 overlay 里没有节点**，要另找来源。
+
+### 红外：代码层面已就绪
+
+- 内核：`CONFIG_RC_CORE=y / RC_DEVICES=y / LIRC=y / IR_SPI=y`（`drivers/media/rc/ir-spi.c` 主线有）
+- DTS 里 `&spi1 { irled@0 { compatible="ir-spi-led"; ... } }` 本来就在，引脚 `gpio8-11` + `function="qup1"` 也对
+- 新 DTB 反编译确认节点在：`irled@0 { compatible="ir-spi-led"; spi-max-frequency=<0x124f800>; }`
+
+### 新增/修正的构建脚本
+
+- **`tools/build-kernel.sh`（新）**：基线配置取**设备上正在跑的 `/proc/config.gz`**（`~/.cache/venus-kernel/device.config`），
+  先跑 `tools/apply-kernel-patches.sh`（面板/触摸/regulator/pcie/ath11k/dpu/battmgr 补丁），
+  再 `Image modules dtbs`，最后交给 `tools/pack-kernel.sh` 落到 `nixos/kernel/`。
+  配置差异实测只有红外相关的 33 行（外加 `panel-venus-k2-test`、`snd-soc-qcom-common`、`venus-snd`
+  三个模块，前者是测试驱动、后两个是音频，源码不在树里）。
+- `tools/pack-kernel.sh`：`rm -rf` 前先 `chmod -R u+w`（从 store 恢复的文件是 444，删不掉）。
+
+### 事故：刷了带红外的内核后设备变哑（未定性）
+
+过程：新 Image（43,620,864 字节）→ 重打 boot.img（31,193,088，md5 b27d81f3…）→
+`dd` 到 `/dev/sde38` 并回读校验一致 → `nix-env --set` 新闭包 → reboot。
+结果：ping 不通、全网段无该 MAC、Windows 侧也没插线所以没有 USB 证据。
+
+**已排除**：内核配置（除红外 33 行外与设备基线一致，面板/触摸模块都在）；
+镜像写入（dd 后回读 md5 一致，备份在 `~/.cache/boot_b-backup-before-ir.img`，201,326,592 字节）。
+
+**唯一发现的差异**：新 boot.img 的 cmdline 比工作版多了两项
+（`boot.shell_on_fail` 和重复的 `firmware_class.path=/run/current-system/firmware`），
+后者会覆盖前面的 `/venus-fw`。已把 `tools/make-bootimg.sh` 的 cmdline 改回与工作版逐字一致，
+重打 `boot-venus-ir2.img`（31,195,136 字节，md5 be801472…）。
+**这只是差异，还没有证据证明它是死因**（preinit 里本来就会用 sysfs 把 path 改到
+`/run/current-system/firmware`，所以理论上无害）。
+
+**待办**：设备重启进 fastboot 后，先用备份 boot.img 回滚确认能起，再用 ir2 单变量重试。
+
+### 教训（写下来避免重犯）
+
+1. **不要用 defconfig 重建内核**：第一版 `build-kernel.sh` 用 defconfig，产出的 Image 缺
+   `panel-xiaomi-venus-k2` / `fts-spi-venus`（设备能跑正是因为有它们）。是从
+   `/proc/config.gz` 对比后才发现，已经写进脚本（基线必须是设备配置）。
+2. 从 store 恢复文件后要注意权限是 444，脚本里 `rm -rf` 会失败。
+3. 换 profile 后**不要只看 `--set` 成功就 reboot**，至少确认闭包已完整 copy 到设备。

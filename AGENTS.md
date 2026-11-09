@@ -28,7 +28,8 @@ tools/
   vpush.sh / vpull.sh         # tar over ssh 传文件（dropbear 没有 sftp，别用新 scp）
   wserial.sh                  # 走 Windows COM3 的命令通道（手机跑我们内核时的串口 shell）
   serial.sh / serial-login.sh / serial-put.sh   # 走本机 /dev/ttyACM0
-  deploy-nixos.sh             # 推配置 + nixos-rebuild switch
+  deploy-nixos.sh             # 推配置 + nixos-rebuild switch（老路子，设备上重建）
+  install-venus.sh            # 装机/更新流水线：dtb / bootimg / rootfs / flash / deploy（本地 build + copy + switch）
   update-kernel.sh            # 换内核（dd 到 boot_b）
 docs/porting-notes.md         # 里程碑日志（每条结论附实测输出）
 docs/references.md            # 参考来源分类整理

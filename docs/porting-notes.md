@@ -1720,7 +1720,8 @@ boot.blacklistedKernelModules = [ "snd_soc_cs35l41" "snd_soc_cs35l41_i2c" "snd_s
 ```
 
 重启后核验：`grep -c cs35l41 /proc/interrupts` = 0、`dmesg | grep -c "nobody cared"` = 0、
-触摸设备在、服务无 failed。
+触摸设备在、服务无 failed。用户现场确认：**卡住期间触摸失效，重启后触摸恢复**，
+与"IRQ 风暴打瘫用户态"这条解释一致（不是触摸硬件/驱动坏）。
 
 ### 3) 排查方法本身的坑：gpg-agent 死了会让所有 ssh 挂住（我在这里浪费了 40 分钟）
 

@@ -88,6 +88,41 @@ PY
 
 echo "完成。内核源码树: $ksrc"
 
+# 3) userspace-consumer: 允许非独占 get + 容忍 is_enabled() 返回负值
+#    缺这一步，WiFi 的五路 regulator-output 会全部 -EBUSY 探测失败，
+#    用户态再怎么 echo enabled 都无效，PCIe 链路就永远训练不起来
+#    （实测：dmesg 里 "reg-userspace-consumer regulator-wifi_aon: error -EBUSY: Failed to get supplies"）。
+python3 - "$ksrc/drivers/regulator/userspace-consumer.c" <<'PYCE'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+changed = False
+if 'devm_regulator_bulk_get_exclusive(' in s:
+    s = s.replace('devm_regulator_bulk_get_exclusive(', 'devm_regulator_bulk_get(')
+    changed = True
+old_is_en = """	ret = regulator_is_enabled(pdata->supplies[0].consumer);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to get regulator status\\n");
+		goto err_enable;
+	}
+	drvdata->enabled = !!ret;"""
+new_is_en = """	ret = regulator_is_enabled(pdata->supplies[0].consumer);
+	if (ret < 0) {
+		/* venus: 这条轨在 PMIC 侧是"被独占"的，is_enabled() 返回 -EBUSY。
+		 * 当作 disabled 处理即可，真正状态由用户态 echo enabled/disabled 决定。 */
+		dev_info(&pdev->dev, "is_enabled() -> %d, 当作 disabled 处理\\n", ret);
+		ret = 0;
+	}
+	drvdata->enabled = !!ret;"""
+if old_is_en in s:
+    s = s.replace(old_is_en, new_is_en); changed = True
+elif '当作 disabled 处理' in s:
+    pass
+else:
+    sys.exit('userspace-consumer 补丁锚点没找到')
+p.write_text(s)
+print('userspace-consumer 已打补丁' if changed else 'userspace-consumer 已是补丁状态')
+PYCE
+
 # 6) dpu_encoder_phys_cmd: tearcheck 的 vsync_count 用四舍五入（上游是截断）
 python3 - "$ksrc/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c" <<'PY'
 import sys, pathlib
@@ -133,3 +168,14 @@ elif anchor in s:
 else:
     print('警告: battmgr 补丁锚点没找到')
 PY
+
+# ---------- 自检：任何一条补丁没落位就报错，避免"静默丢补丁" ----------
+fail=0
+chk() { grep -q "$1" "$2" || { echo "补丁缺失: $1  在 $2" >&2; fail=1; }; }
+chk 'TOUCHSCREEN_VENUS_FTS' "$ksrc/drivers/input/touchscreen/Kconfig"
+chk 'DRM_PANEL_XIAOMI_VENUS_K2' "$ksrc/drivers/gpu/drm/panel/Kconfig"
+chk 'qcom_pcie_remove' "$ksrc/drivers/pci/controller/dwc/pcie-qcom.c"
+chk 'devm_regulator_bulk_get(' "$ksrc/drivers/regulator/userspace-consumer.c"
+chk '当作 disabled 处理' "$ksrc/drivers/regulator/userspace-consumer.c"
+[ $fail -eq 0 ] || { echo "内核补丁自检失败" >&2; exit 1; }
+echo "内核补丁自检通过"

@@ -1185,6 +1185,22 @@
 		};
 	};
 
+	/* WLAN_EN(gpio64) / BT_EN(gpio65)：值与厂商 DT 的 cnss_pins / bt_en 对齐。
+	 * 只在 pinctrl 里配 mux+bias+drive，输出电平交给 GPIO 使用者（regulator-fixed）决定。 */
+	wlan_en_active: wlan-en-active-state {
+		pins = "gpio64";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-pull-up;
+	};
+
+	bt_en_active: bt-en-active-state {
+		pins = "gpio65";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
 	qup_spi1_default: qup-spi1-default-state {
 		pins = "gpio8", "gpio9", "gpio10", "gpio11";
 		function = "qup1";
@@ -1275,6 +1291,14 @@
 		regulator-name = "wlan_en";
 		regulator-min-microvolt = <1800000>;
 		regulator-max-microvolt = <1800000>;
+		/*
+		 * 厂商 DT 把这个脚配成 function=gpio / drive-strength=16mA /
+		 * bias-pull-up（cnss_pins 里的 cnss_wlan_en_active）。主线里没有这个
+		 * 状态，于是 pad 保持 bootloader 留下的 mux —— 运气好能用、运气不好
+		 * WLAN_EN 驱不动，WiFi 芯片不上电，PCIe 链路就永远 train 不起来。
+		 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&wlan_en_active>;
 		gpio = <&tlmm 64 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
@@ -1334,6 +1358,9 @@
 		 * 覆盖，芯片拿不到干净的复位脉冲 → ROM 版本读取 0xfc00 一直超时。 */
 		enable-gpios = <&tlmm 65 GPIO_ACTIVE_HIGH>;
 		swctrl-gpios = <&tlmm 153 GPIO_ACTIVE_HIGH>;
+		/* 同 wlan_en：厂商 DT 对 gpio65 有 mux/驱动能力配置，主线没有 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&bt_en_active>;
 
 		/*
 		 * 芯片自报的 BD_ADDR 是全零（00:00:00:00:5A:AD），内核据此把设备标成

@@ -1792,3 +1792,54 @@ sn-nci@28 { compatible="qcom,sn-nci"; reg=<0x28>; irq=gpio0x57; ven=0x3e; firm=0
    `/proc/config.gz` 对比后才发现，已经写进脚本（基线必须是设备配置）。
 2. 从 store 恢复文件后要注意权限是 444，脚本里 `rm -rf` 会失败。
 3. 换 profile 后**不要只看 `--set` 成功就 reboot**，至少确认闭包已完整 copy 到设备。
+
+## 2026-11-09 · 红外适配：决定放弃（结论与证据）
+
+### 已确认的事实
+
+1. **红外驱动层没问题**：`RC_CORE/RC_DEVICES/LIRC/IR_SPI` 编进内核，DTS 里
+   `&spi1 { irled@0 { compatible="ir-spi-led" } }` 与 vendor overlay（`fragment@113`，
+   `qupv3_se1_spi`=上游 `spi@984000`=spi1，gpio8-11 `function="qup1"`，19.2MHz）逐项一致。
+2. **DTB 无罪（单变量验证）**：把"旧内核 Image（#52，Oct 28）+ 新 DTB + 旧 initrd"
+   打成 `boot-testA.img` 刷入 boot_b，重启后 **wlan0 正常、拿到 192.168.0.150**。
+   说明新的 reserved-memory/splash/framebuffer 布局不影响 PCIe/WiFi。
+3. **换了新内核之后，PCIe 端点不枚举**（对比三次启动）：
+
+   ```
+   启动            17cb:1103 (WCN6855 端点)   host-bridge 次数
+   -3 (旧内核)              1                        2
+   -2 (新内核)              0                        4      ← 多出 2 次 = 脚本里的重绑重试
+   -1 (旧内核, 恢复备份)     1                        2
+    0 (旧内核+新DTB)        1                        2
+   ```
+
+   坏的那次只有一个 root port `0000:00:00.0`，没有 `0000:01:00.0`，因此 ath11k 无从加载，
+   表现为"网卡不存在"。`venus-wifi-setup` 的链路重试（拨 `wlan_en` + `1c00000.pcie` unbind/bind）
+   不但没救回来，反而把 PCIe 留在未绑定状态（host-bridge 从 2 次变 4 次）。
+4. 新内核与设备基线配置的差异只有红外那 33 行（外加 3 个无关模块：`panel-venus-k2-test`、
+   `snd-soc-qcom-common`、`venus-snd`）。所以不是"某驱动被关掉"，更像是**初始化时序**问题：
+   多编进 RC/LIRC 子系统后 PCIe 首次 link training 与 WiFi 电源轨建立了不同的竞争关系。
+
+### 决定
+
+用户判断"太麻烦，放弃这个适配项"。已做的处置：
+
+- `boot_b` 刷回工作版备份（`~/.cache/boot_b-backup-before-ir.img`，201,326,592 字节）
+- `nixos/kernel/` 恢复成工作版产物（Image 43,325,952 + 644 个模块，取自
+  `/nix/store/cgdqj3251kmpjbqvzgh7lyjn5864lkci-linux-venus-7.2.6`）
+- 内核源码树/构建目录里仍保留带红外的配置，但**不再用于出镜像**
+
+### 保留的资产（以后想捡起来可以直接用）
+
+- `tools/build-kernel.sh`：以设备 `/proc/config.gz` 为基线的增量构建（这一步是这次最大的教训，
+  用 defconfig 会静默丢掉面板/触摸驱动）
+- `tools/make-bootimg.sh`：cmdline 已与工作版逐字对齐（去掉 `boot.shell_on_fail` 与重复的
+  `firmware_class.path`）
+- 反编译出来的 vendor DT 在 `~/.cache/venus-dt/`（`venus_46.dtb` / `base4.dtb` + dts）
+
+### 若要继续的建议顺序
+
+1. 先把 `venus-wifi-setup` 写成"幂等且有上限"的：先等 8s 让首次 link training 完成，
+   失败才做一次 unbind/bind，并且**最后一次必须把 `1c00000.pcie` 绑回去**（现在是失败后留空）
+2. 再把红外配置改为 `IR_SPI=m`（模块），把 builtin Image 的变化降到最小，重测
+3. 每次只改一项；验证标准写死：`lspci | grep 17cb:1103` 有端点 + `wlan0` 拿地址 + `ls /sys/class/rc`

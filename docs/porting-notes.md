@@ -1666,3 +1666,13 @@ rtcwake -m freeze -s 15
 上一 boot 的内核日志里也没有 PM: suspend 相关行，说明挂在非常早的阶段。
 结论：**休眠先不用**，要用得先查 `mem_sleep` 走 deep 还是 s2idle、以及 PDC/唤醒源配置
 （`/proc/acpi/wakeup` 是空的，qcom-pdc 驱动没挂 wakeup 源）。这条未开始。
+
+### 踩坑：本机 `/` 和 `/tmp` 是 tmpfs，别把镜像写到那儿
+
+本机（ml-laptop）根文件系统是 **tmpfs**（`stat -f -c %T /` → `tmpfs`，25G），
+只有 `/home/zhyi` 在 nvme 上。我把 `WORK=/tmp/venus-verify` 指向 tmpfs 跑 rootfs 阶段，
+12GiB 镜像 + 8.2GiB 文件树全部进了内存 → **整机 OOM**（08:17:16 内核 global_oom，
+`noctalia` 被 kill，桌面挂了）。
+
+`tools/install-venus.sh` 现在开跑前先查存储类型，命中 tmpfs/ramfs 直接退出；
+`WORK` 默认 `~/.cache/venus-install`、`BUILD_ROOT` 默认 `~/.cache/venus-build`（都在 nvme 上）。

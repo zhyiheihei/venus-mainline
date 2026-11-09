@@ -15,12 +15,24 @@ root=$(cd "$here/.." && pwd)
 
 KERNEL_BUILD=${KERNEL_BUILD:-$HOME/.cache/venus-kernel/linux-build}
 WORK=${WORK:-$HOME/.cache/venus-install}
-BUILD_ROOT=${BUILD_ROOT:-/tmp/venus-build}
+BUILD_ROOT=${BUILD_ROOT:-$HOME/.cache/venus-build}
 PHONE_IP=${PHONE_IP:-192.168.0.150}
 IMG_SIZE=${IMG_SIZE:-12G}
 NIXSRC=${NIXSRC:-$root/kernel/linux-7.2.6}
 DTB_SRC=$root/kernel/venus/sm8350-xiaomi-venus.dts
 DTB=$KERNEL_BUILD/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb
+
+# 本机 /tmp 是 tmpfs（内存盘），往那里写 12GiB 镜像会直接把整机 OOM。
+require_disk_backed() {
+  local p=$1
+  while [ ! -e "$p" ] && [ "$p" != "/" ]; do p=$(dirname "$p"); done
+  local t; t=$(stat -f -c %T "$p" 2>/dev/null || echo unknown)
+  case $t in
+    tmpfs|ramfs) echo "$p 在 $t 上（内存盘），写 12GiB 镜像会把整机 OOM；换到磁盘路径" >&2; exit 1 ;;
+  esac
+}
+
+case ${1:-all} in rootfs|flash|all) require_disk_backed "$WORK" ;; esac
 
 # cache.zhyi.xin 已死，留着会让每个 store path 空等 60s
 export NIX_CONFIG="substituters = http://192.168.0.56:13851 https://cache.nixos.org https://cache.lantian.pub/lantian https://lab.opi5p.zhyi.xin/nix-static-file-cache

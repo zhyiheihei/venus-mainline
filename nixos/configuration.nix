@@ -28,6 +28,15 @@ in
   # 而我们的内核没开 FW_LOADER_COMPRESS，所以 venus-firmware 服务会先解压到 /var/lib/venus-fw）
   boot.kernelParams = [ "console=ttyGS0,115200" "consoleblank=0" ];
 
+  # 音频不做（用户明确不需要），但 DTS 里的两颗 CS35L41 功放节点还在，
+  # udev 看到 i2c 设备就 auto-load 驱动，然后就是 IRQ 风暴：
+  #   irq 210: nobody cared ... handlers: cs35l41_irq [snd_soc_cs35l41]
+  #   Disabling IRQ #210
+  # 之后触摸停摆、用户态变卡（实测 2026-11-09 08:19）。直接不让它们加载。
+  boot.blacklistedKernelModules = [
+    "snd_soc_cs35l41" "snd_soc_cs35l41_i2c" "snd_soc_cs35l41_lib"
+  ];
+
   # ---------- 网络 ----------
   networking.hostName = "venus";
   # WiFi 交给 NetworkManager：这样 Plasma 的网络面板（plasma-nm）才能列出/切换 WiFi。
@@ -47,6 +56,10 @@ in
     ensureProfiles.profiles.venus-wifi = {
       connection = {
         id = "<WIFI_SSID>";
+        # 固定 uuid：声明式 profile 写在 /run 里（tmpfs，每次启动重建），
+        # 不写 uuid 的话 NM 每次都会自生成一个新的 → 同一个 SSID 在 UI 里
+        # 出现多条“相同的连接”，互相抢 wlan0（连上→拿 IP→掉→重连）。
+        uuid = "7c2f1a84-5b3e-4a91-9d24-1f6c0e8ab3d5";
         type = "wifi";
         interface-name = "wlan0";
         autoconnect = true;
@@ -257,9 +270,8 @@ in
           ${pkgs.networkmanager}/bin/nmcli -t -f GENERAL.STATE,IP4.ADDRESS device show wlan0 2>&1 | head -3
           echo "carrier=$(cat /sys/class/net/wlan0/carrier 2>/dev/null)"
         } >> /var/log/venus-net.log 2>&1
-        ${pkgs.iw}/bin/iw dev wlan0 set power_save off 2>/dev/null
-        [ -z "$(${pkgs.iproute2}/bin/ip -4 -o addr show wlan0 2>/dev/null)" ] && \\
-          ${pkgs.networkmanager}/bin/nmcli connection up venus-wifi >/dev/null 2>&1
+        # 只记录，不动网络：曾经在这里每 30s 调 iw/nmcli 抢 wlan0，
+        # 与 NM 自己的调度打架，反而造成连接反复抖动。
         sz=$(${pkgs.coreutils}/bin/stat -c %s /var/log/venus-net.log 2>/dev/null || echo 0)
         if [ "$sz" -gt 262144 ]; then
           ${pkgs.coreutils}/bin/tail -c 100000 /var/log/venus-net.log > /var/log/venus-net.log.tmp

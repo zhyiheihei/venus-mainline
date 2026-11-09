@@ -1676,3 +1676,57 @@ rtcwake -m freeze -s 15
 
 `tools/install-venus.sh` 现在开跑前先查存储类型，命中 tmpfs/ramfs 直接退出；
 `WORK` 默认 `~/.cache/venus-install`、`BUILD_ROOT` 默认 `~/.cache/venus-build`（都在 nvme 上）。
+
+## 2026-11-09 · 两个"玄学"故障的实证根因：重复 WiFi 连接 + cs35l41 IRQ 风暴
+
+### 1) UI 里出现两条同名 WiFi 连接 → wlan0 被反复抢
+
+nixpkgs 把声明式 profile 写到 **`/run/NetworkManager/system-connections/<属性名>.nmconnection`**
+（tmpfs，每次启动重建）：`nixos/modules/services/networking/networkmanager.nix:630` 的
+`NetworkManager-ensure-profiles`。我们的 profile **没有写 `connection.uuid`**，NM 对缺 uuid
+的 keyfile 会自己生成一个 → 每次重建/重启，同一个 SSID 都成了"新连接"，界面上就出现两条同名连接，
+互相抢 wlan0，表现是「连上 → 拿到 IP → 掉 → 再连」，sshd 被打断。
+
+修复：配置里给固定 uuid。实测部署后：
+
+```
+nmcli -t -f NAME,UUID,DEVICE connection show
+  moli-1004-backup:7c2f1a84-5b3e-4a91-9d24-1f6c0e8ab3d5:wlan0:activated
+ping -c 50 -i 0.2 → 50/50, 0% loss
+```
+
+另外一个放大器（我加的）：`venus-net-watch` 曾经每 30s 跑 `iw set power_save off` 和
+`nmcli connection up venus-wifi`。后者永远失败（profile 的 id 是 SSID，`venus-wifi` 只是
+Nix 属性名），但配上两条重名连接就跟 NM 调度打架。现在这个服务**只写日志，不碰网络**。
+
+### 2) 触摸突然失效 + 整个用户态变卡 → cs35l41 功放 IRQ 风暴
+
+```
+kernel: irq 210: nobody cared (try booting with the "irqpoll" option)
+kernel: CPU: 0 PID: 756 Comm: irq/210-cs35l41
+kernel: handlers:
+kernel: [<...>] irq_default_primary_handler threaded [<...>] cs35l41_irq [snd_soc_cs35l41]
+kernel: Disabling IRQ #210
+```
+
+`kernel/venus/sm8350-xiaomi-venus.dts:629,646` 里有两颗 `cirrus,cs35l41` 功放节点，
+udev 看到 i2c 设备就 auto-load 驱动（`CONFIG_SND_SOC_CS35L41_I2C=m`），然后中断一直没人清，
+10 万次之后内核把 IRQ 210 关掉，用户态跟着卡（触摸事件没人处理、ssh 也进不去）。
+
+音频本来就不做，所以直接黑名单，不需要改 DTB/重刷：
+
+```nix
+boot.blacklistedKernelModules = [ "snd_soc_cs35l41" "snd_soc_cs35l41_i2c" "snd_soc_cs35l41_lib" ];
+```
+
+重启后核验：`grep -c cs35l41 /proc/interrupts` = 0、`dmesg | grep -c "nobody cared"` = 0、
+触摸设备在、服务无 failed。
+
+### 3) 排查方法本身的坑：gpg-agent 死了会让所有 ssh 挂住（我在这里浪费了 40 分钟）
+
+本机 08:17 OOM 之后，`SSH_AUTH_SOCK=/run/user/1000/gnupg/S.gpg-agent.ssh` 背后的 agent 已经废了。
+之后**每一条 ssh 命令都表现为"TCP 连上、没有 banner、最后超时"**，`git commit`（启用了
+`commit.gpgsign`）同样卡死。我据此误判成"手机 sshd 死了、设备又卡住了"，其实手机一直好的。
+
+判别方法：`env -u SSH_AUTH_SOCK ssh -o IdentityAgent=none root@<host> true` —— 立刻通就是它。
+本次实际用的就是这条。以后遇到"ping 通、SSH 不出 banner"，**先排除本机 agent**，再怀疑对端。

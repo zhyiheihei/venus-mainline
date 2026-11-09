@@ -295,6 +295,41 @@ in
     '';
   };
 
+  # ---------- 换内核失败自动回滚（省掉"每次都要人肉进 fastboot"）----------
+  # WiFi 起不来 = 内核有问题（PCIe 没 link up 或 ath11k 没绑上），此时系统虽然能跑
+  # 但没有网络通道，人又进不去。这个服务在开机 90s 后自检：拿不到地址就把
+  # /root/boot_b-good.img（工作版镜像）dd 回 boot_b 并重启，最多连做 3 次。
+  # 同时把现场的 dmesg / 网络状态写到 /var/log/venus-bootfail.log（持久化），
+  # 回滚后就能直接读到失败原因，不用再靠人肉刷机取证。
+  systemd.services.venus-wifi-fallback = {
+    description = "venus: WiFi 起不来时自动回滚 boot_b 并落证据";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "venus-wifi-power.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    script = ''
+      set +e
+      sleep 90
+      ip -4 -o addr show wlan0 2>/dev/null | grep -q "inet " && exit 0
+      GOOD=/root/boot_b-good.img
+      LOG=/var/log/venus-bootfail.log
+      {
+        echo "===== $(date '+%F %T') 启动失败取证 (uname: $(uname -r), $(uname -v)) ====="
+        echo "--- ip -o addr ---"; ip -o addr
+        echo "--- pci 端点 ---"; for d in /sys/bus/pci/devices/*; do echo "$(basename $d) $(cat $d/vendor 2>/dev/null):$(cat $d/device 2>/dev/null) $(basename $(readlink $d/driver 2>/dev/null) 2>/dev/null)"; done | head -6
+        echo "--- dmesg 关键行 ---"
+        dmesg | grep -iE "pcie|ath11k|wcn|reg-userspace|link up|firmware" | tail -60
+      } >> "$LOG" 2>&1
+      [ -f "$GOOD" ] || { echo "没有 $GOOD，无法回滚" >> "$LOG"; exit 0; }
+      n=$(cat /var/lib/venus-rollback-count 2>/dev/null || echo 0)
+      [ "$n" -ge 3 ] && { echo "已回滚 $n 次，停止" >> "$LOG"; exit 0; }
+      echo $((n+1)) > /var/lib/venus-rollback-count
+      echo "--- 回滚 boot_b ($GOOD) ---" >> "$LOG"
+      dd if="$GOOD" of=/dev/sde38 bs=1M conv=fsync >> "$LOG" 2>&1
+      sync
+      systemctl reboot
+    '';
+  };
+
   # ---------- 桌面环境（KDE Plasma 6，与本机 NixOS 主机同款）----------
   # 本机主机跑的是 Plasma 6 + greetd(startplasma-wayland)，这里对齐同一套。
   # 选 Plasma 而不是 GNOME 的理由：本机同款，且 Wayland 会话不需要 Xorg。

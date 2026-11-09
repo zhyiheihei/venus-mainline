@@ -123,6 +123,68 @@ p.write_text(s)
 print('userspace-consumer 已打补丁' if changed else 'userspace-consumer 已是补丁状态')
 PYCE
 
+# 4) ath11k: 支持 WCN6851（SM8350 上 WCN6855 的早期版，自报 hw1.1）
+#    没有这一步，probe 直接 "Unsupported WCN6855 SOC hardware version: 1 16" 失败(-EOPNOTSUPP)，
+#    表现为"PCIe 端点有了、但 wlan0 永远不出现"。对应上游
+#    "wifi: ath11k: enable support for WCN6851" 系列里必需的那一半。
+python3 - "$ksrc/drivers/net/wireless/ath/ath11k" <<'PYATH'
+import sys, pathlib, re
+D = pathlib.Path(sys.argv[1]); changed = []
+
+# a) core.h: 枚举
+p = D/'core.h'; s = p.read_text()
+if 'ATH11K_HW_WCN6851_HW10' not in s:
+    s = s.replace("\tATH11K_HW_WCN6855_HW21,",
+                  "\tATH11K_HW_WCN6855_HW21,\n\tATH11K_HW_WCN6851_HW10,", 1)
+    p.write_text(s); changed.append('core.h')
+
+# b) pci.c: soc_hw_version_major == 1 → hw1.1
+p = D/'pci.c'; s = p.read_text()
+if 'ATH11K_HW_WCN6851_HW10' not in s:
+    old = "\t\tswitch (soc_hw_version_major) {\n\t\tcase 2:"
+    new = ("\t\tswitch (soc_hw_version_major) {\n"
+           "\t\tcase 1:\n"
+           "\t\t\t/* WCN6851: SM8350 平台上的 WCN6855 早期版，自报 hw1.1 */\n"
+           "\t\t\tab->hw_rev = ATH11K_HW_WCN6851_HW10;\n"
+           "\t\t\tbreak;\n"
+           "\t\tcase 2:")
+    if old in s:
+        s = s.replace(old, new, 1); p.write_text(s); changed.append('pci.c')
+
+# c) mhi.c: 复用 qca6390 的 mhi 配置
+p = D/'mhi.c'; s = p.read_text()
+if 'ATH11K_HW_WCN6851_HW10' not in s:
+    s = s.replace("\tcase ATH11K_HW_WCN6855_HW21:",
+                  "\tcase ATH11K_HW_WCN6855_HW21:\n\tcase ATH11K_HW_WCN6851_HW10:", 1)
+    p.write_text(s); changed.append('mhi.c')
+
+# d) pcic.c: MSI 配置表（与 wcn6855 相同：32 向量 / MHI3 CE10 WAKE1 DP18）
+p = D/'pcic.c'; s = p.read_text()
+if 'ATH11K_HW_WCN6851_HW10' not in s:
+    m = re.search(r"\t\{\n(?:\t\t\.[\s\S]*?)hw_rev = ATH11K_HW_WCN6855_HW20,\n\t\},", s)
+    if m:
+        block = m.group(0)
+        newblk = block.replace('ATH11K_HW_WCN6855_HW20', 'ATH11K_HW_WCN6851_HW10')
+        s = s.replace(block, block + '\n' + newblk, 1)
+        p.write_text(s); changed.append('pcic.c')
+
+# e) core.c: hw_params 里加一条，复用 wcn6855 hw2.0 的全部参数，只改 name / hw_rev / fw.dir
+p = D/'core.c'; s = p.read_text()
+if 'wcn6855 hw1.1' not in s:
+    lines = s.splitlines(keepends=True)
+    i = next(k for k, l in enumerate(lines) if l.strip() == '.name = "wcn6855 hw2.0",')
+    start = max(k for k in range(i) if lines[k] == "\t{\n")
+    end = next(k for k in range(i, len(lines)) if lines[k] == "\t},\n")
+    block = ''.join(lines[start:end + 1])
+    newblk = (block.replace('"wcn6855 hw2.0"', '"wcn6855 hw1.1"')
+                   .replace('ATH11K_HW_WCN6855_HW20', 'ATH11K_HW_WCN6851_HW10')
+                   .replace('"WCN6855/hw2.0"', '"WCN6855/hw1.1"'))
+    out = ''.join(lines[:end + 1]) + newblk + ''.join(lines[end + 1:])
+    p.write_text(out); changed.append('core.c')
+
+print('ath11k WCN6851 支持: ' + (', '.join(changed) if changed else '已在位'))
+PYATH
+
 # 6) dpu_encoder_phys_cmd: tearcheck 的 vsync_count 用四舍五入（上游是截断）
 python3 - "$ksrc/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c" <<'PY'
 import sys, pathlib
@@ -177,5 +239,7 @@ chk 'DRM_PANEL_XIAOMI_VENUS_K2' "$ksrc/drivers/gpu/drm/panel/Kconfig"
 chk 'qcom_pcie_remove' "$ksrc/drivers/pci/controller/dwc/pcie-qcom.c"
 chk 'devm_regulator_bulk_get(' "$ksrc/drivers/regulator/userspace-consumer.c"
 chk '当作 disabled 处理' "$ksrc/drivers/regulator/userspace-consumer.c"
+chk 'ATH11K_HW_WCN6851_HW10' "$ksrc/drivers/net/wireless/ath/ath11k/pci.c"
+chk 'wcn6855 hw1.1' "$ksrc/drivers/net/wireless/ath/ath11k/core.c"
 [ $fail -eq 0 ] || { echo "内核补丁自检失败" >&2; exit 1; }
 echo "内核补丁自检通过"

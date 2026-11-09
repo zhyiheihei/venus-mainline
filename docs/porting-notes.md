@@ -1983,3 +1983,19 @@ display-manager/graphical.target` 全 active，触摸在，DSI-1 connected，无
 **串口**。USB 口目前在任何主机上都不枚举（Windows 与笔记本都没有设备），
 而所有"进不了用户态"的失败只有串口能取证。先解决这根线/这个口，再谈 ath11k WCN6851。
 在此之前，任何内核改动都不该再往设备上刷 —— 因为失败只能靠人肉 fastboot 回滚。
+
+---
+
+## 2026-11-09 · v0.1.0 定格
+
+以当时设备状态为准发布 v0.1.0（详见 `docs/RELEASE-0.1.0.md`）：
+
+- 内核 `7.2.6 #52 (Oct 28)`，Image md5 `b08a5eb2628eb8ff6c1cdf0b2eca84ca`
+- 系统闭包 `9nv5kxlxzalswnhybszpmxxvg7dgm31g`，boot_b md5 `dd488b8eefcc2f8567459f8e37e2b2c1`
+- 可用范围：显示/背光/触摸/GPU/UFS/WiFi/蓝牙/电池充电/温度/CPU/电源键/音量上键/USB ACM 控制台
+- 不在范围：音频（黑名单）、红外（放弃）、摄像头、基带、传感器、振动、NFC、休眠、OTG 键鼠
+
+后续版本（v0.1.1 起）的三件事，按顺序：
+1. 设备 DTB 与仓库 DTS 对齐（仓库已含 `wlan_en`/`bt_en` 的 pinctrl）
+2. 重建内核可用（需要串口；ath11k 的 WCN6851 路径是最后一个已知未知）
+3. OTG 键鼠与音量下键（都在等第 2 条）

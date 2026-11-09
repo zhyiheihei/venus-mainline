@@ -243,8 +243,12 @@ in
     description = "venus: 网络/链路状态记录";
     wantedBy = [ "multi-user.target" ];
     after = [ "venus-wifi-power.service" ];
-    serviceConfig = { Type = "simple"; Restart = "always"; };
+    serviceConfig = { Type = "simple"; Restart = "always"; RestartSec = 30; };
     script = ''
+      # NixOS 的 script 包装带 set -e，而开机时 wlan0 还不存在（wifi-power 是后台跑的），
+      # iw 会返回非 0 直接把这个服务打死，所以先 set +e 并等网卡出现。
+      set +e
+      while [ ! -d /sys/class/net/wlan0 ]; do sleep 5; done
       while true; do
         {
           echo "=== $(date '+%F %T')"
@@ -253,7 +257,14 @@ in
           ${pkgs.networkmanager}/bin/nmcli -t -f GENERAL.STATE,IP4.ADDRESS device show wlan0 2>&1 | head -3
           echo "carrier=$(cat /sys/class/net/wlan0/carrier 2>/dev/null)"
         } >> /var/log/venus-net.log 2>&1
-        if [ $(stat -c %s /var/log/venus-net.log 2>/dev/null || echo 0) -gt 262144 ]; then tail -c 100000 /var/log/venus-net.log > /var/log/venus-net.log.tmp && mv /var/log/venus-net.log.tmp /var/log/venus-net.log; fi
+        ${pkgs.iw}/bin/iw dev wlan0 set power_save off 2>/dev/null
+        [ -z "$(${pkgs.iproute2}/bin/ip -4 -o addr show wlan0 2>/dev/null)" ] && \\
+          ${pkgs.networkmanager}/bin/nmcli connection up venus-wifi >/dev/null 2>&1
+        sz=$(${pkgs.coreutils}/bin/stat -c %s /var/log/venus-net.log 2>/dev/null || echo 0)
+        if [ "$sz" -gt 262144 ]; then
+          ${pkgs.coreutils}/bin/tail -c 100000 /var/log/venus-net.log > /var/log/venus-net.log.tmp
+          ${pkgs.coreutils}/bin/mv /var/log/venus-net.log.tmp /var/log/venus-net.log
+        fi
         sleep 30
       done
     '';

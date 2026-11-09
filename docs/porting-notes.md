@@ -1572,3 +1572,41 @@ ssh root@192.168.0.150 'nix-env -p /nix/var/nix/profiles/system --set <closure>
 - 显示：`card1-DSI-1` = connected/enabled/1440x3200，SDDM 自动登录 venus，Plasma Wayland 会话已启动
 - 串口：`venus-acm.service` 在 systemd 里重建 ACM gadget（`/dev/ttyGS0` 存在），
   Windows 侧需拔插一次数据线才会重新枚举出 COM
+
+### 冷启动实测（2026-11-09 08:03，换机后第一次完整可用的开机）
+
+```
+uptime            →  up 0:01（冷启动）
+services          →  venus-acm / venus-net-watch / venus-wifi-power /
+                      display-manager / graphical.target 全部 active
+iw get power_save →  off
+ip addr wlan0     →  192.168.0.150/24
+输入设备           →  venus-fts-ts（触摸）+ gpio-keys/pmic_pwrkey/pmic_resin
+loginctl          →  seat0 上 sddm + plasma 两个会话
+systemctl --failed→  无
+```
+
+屏幕：**正常桌面，内容显示、刷新正常、触摸可操作**。
+
+### 一个和旧机记录相悖的事实（记下来别再误判）
+
+旧机（8GB）当时结论是「`sm8350.dtsi` 的 mdss 缺 vsync 时钟 → tearcheck 不使能 →
+只有第一帧」，并给 msm 打了 19.2MHz 兜底补丁。
+
+新机上**不需要那个补丁**，实测：
+
+```
+/sys/kernel/debug/clk/clk_summary
+  disp_cc_mdss_vsync_clk   1  1  0  19200000  ...  display-controller@ae01000
+```
+
+vsync 时钟存在且被 DPU 持有（19.2MHz），我们的 DTS 里也把面板 TE 接在
+`tlmm gpio82 → mdp_vsync`（见 dts:1291-1297、1413）。所以命令模式面板的 tearcheck
+是正常工作的，画面能持续刷新。**以后遇到画面不刷新，先查 clk_summary 里 vsync 有没有**，
+别直接照旧机结论去打补丁。
+
+### 当前可用的运维口径
+
+- 部署：`nix copy --to ssh://root@192.168.0.150` + `nix-env --set` + `switch-to-configuration switch`
+- 内核更新：打包 boot.img → `ssh ... 'dd of=/dev/sde38'`（boot_b，192MB）→ reboot，**不需要 fastboot**
+- 串口：`venus-acm.service` 重建 gadget；Windows 侧要拔插数据线才会重新枚举出 COM

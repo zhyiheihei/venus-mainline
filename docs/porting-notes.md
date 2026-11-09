@@ -1913,3 +1913,73 @@ pmic-glink { connector@0 { compatible="usb-c-connector"; power-role="dual"; data
 1. **插数据线走串口**（不用 fastboot）抓一次"重建内核"启动的 PCIe/PHY 完整日志，
    和旧内核的逐行对比 —— 这是唯一能把这条拦路虎定位下来的办法，解开它后面所有内核工作才可能
 2. 放弃所有需要改内核的适配项，只留"改配置/用户态"能做的事
+
+## 2026-11-09 深夜 · 重建内核失败的完整链条（逐层扒开）+ ath11k WCN6851
+
+用户要求"所有配置项都审核一遍，对比主线所有 sm8350 配置"，于是把每次失败都摊开验证，
+结论按出现顺序记录（每层都有日志为证）：
+
+### 第 1 层：reserved-memory / memory（已修，早已验证）
+写死旧 8GB 布局 → 卡米标。改全零占位后能启动。
+
+### 第 2 层：WiFi 五路 regulator 的 userspace-consumer 补丁（已修，已验证生效）
+```
+reg-userspace-consumer regulator-wifi_{io,rfa1,rfa2,aon}: error -EBUSY: Failed to get supplies
+```
+补丁代码曾静默丢失（只剩注释），五路电全部 probe 失败 → 用户态 echo 无效。
+已写回 `apply-kernel-patches.sh` 并加入自检。**修好后同一次启动里 PCIe 就 link up 了**：
+```
+qcom-pcie 1c00000.pcie: PCIe Gen.3 x1 link up
+pci 0000:01:00.0: [17cb:1103] type 00 class 0x028000 PCIe Endpoint
+```
+
+### 第 3 层：gpio64/65 的 pinctrl（已修，已验证）
+厂商 DT 有 `cnss_pins/cnss_wlan_en_active`（gpio64, function=gpio, 16mA, pull-up），主线没有。
+补上后：
+```
+pin 64 (GPIO_64): device regulator-wlan-en function gpio group gpio64
+```
+
+### 第 4 层：ath11k 不认 WCN6851（当前卡点）
+```
+ath11k_pci 0000:01:00.0: Unsupported WCN6855 SOC hardware version: 1 16
+ath11k_pci 0000:01:00.0: probe with driver ath11k_pci failed with error -95
+```
+这台机的 WiFi 是 WCN6851（自报 hw1.1），主线 7.2.6 只认 WCN6855 hw2.0/hw2.1。
+Oct-28 那个内核能用，是因为当时手工打过补丁，而那棵树后来被我重新解压覆盖，补丁消失。
+
+自己补的最小实现（`apply-kernel-patches.sh` 里）：core.h 加 `ATH11K_HW_WCN6851_HW10`；
+pci.c 在 **WCN6855 分支** 里加 `case 1`（注意：pci.c 有两个 `switch (soc_hw_version_major)`，
+先 QCA6390 后 WCN6855，我第一次插进了前一个，编译通过但完全不生效 —— 已加自检防再犯）；
+mhi.c/pcic.c 复用 wcn6855 配置；core.c 增加 `.name="wcn6855 hw1.1"` /
+`.fw.dir="WCN6855/hw1.1"` 的 hw_params（设备上正好有这个固件目录）。
+
+**结果：这个版本没能进到用户态** —— 启动后 ABL 直接停回 fastboot，没有 journal、没有 pstore
+（`/sys/fs/pstore` 空），即死在 early boot。上一个版本（补丁插错位置、ath11k 直接 -EOPNOTSUPP）
+反而能进系统。所以现在缺的是"ath11k probe 期间崩了"的现场，需要串口才能定位。
+
+### 顺手做出来的两件有用东西
+
+1. **`venus-wifi-fallback` 服务**：开机 90s 后若 `wlan0` 没地址，就把现场
+   （ip / PCI 设备与驱动绑定 / dmesg 里 pcie+ath11k 的关键行）追加到
+   `/var/log/venus-bootfail.log`，然后 `dd /root/boot_b-good.img` 回 boot_b 并重启，最多 5 次。
+   **实测有效**：两次失败启动都被它自动救回并把日志留下来（日志里能看到
+   `0000:01:00.0 0x17cb:0x1103 driver=` 空 —— 即端点在了但驱动没绑上）。
+   踩过的坑：systemd 的最小 PATH 下 `ip`/`dmesg` 找不到，会让自检恒失败，
+   **把好系统也回滚**（第一次部署时的两条记录就是）；已改成 `${pkgs.iproute2}` 等绝对路径。
+
+2. **PVE 直通时 Windows 看不到新设备**：不一定要拔插，先试
+   `C:\Windows\System32\pnputil.exe /scan-devices`（实测立刻枚举出 `VID_18D1&PID_D00D`，
+   `fastboot devices` 随后就能看到设备）。
+
+### 当前稳定状态（已核验）
+
+profile → `/nix/store/9nv5kxlxzalswnhybszpmxxvg7dgm31g-nixos-system-venus-25.05...`（system-17-link），
+内核 `#52 Oct 28`，`wlan0` + 192.168.0.150，`venus-acm/venus-wifi-power/venus-net-watch/
+display-manager/graphical.target` 全 active，触摸在，DSI-1 connected，无 failed 单元。
+
+### 要往前走的唯一前提
+
+**串口**。USB 口目前在任何主机上都不枚举（Windows 与笔记本都没有设备），
+而所有"进不了用户态"的失败只有串口能取证。先解决这根线/这个口，再谈 ath11k WCN6851。
+在此之前，任何内核改动都不该再往设备上刷 —— 因为失败只能靠人肉 fastboot 回滚。

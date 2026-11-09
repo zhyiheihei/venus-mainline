@@ -306,22 +306,31 @@ in
     wantedBy = [ "multi-user.target" ];
     after = [ "venus-wifi-power.service" ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    path = with pkgs; [ iproute2 util-linux coreutils gawk ];
     script = ''
       set +e
       sleep 90
-      ip -4 -o addr show wlan0 2>/dev/null | grep -q "inet " && exit 0
+      # 注意：这里必须用 path 里给的 ip/dmesg，否则 systemd 的最小 PATH 下
+      # "ip: command not found" 会让自检恒失败，把好系统也回滚掉（踩过）。
+      if ${pkgs.iproute2}/bin/ip -4 -o addr show wlan0 2>/dev/null | grep -q "inet "; then
+        rm -f /var/lib/venus-rollback-count
+        exit 0
+      fi
       GOOD=/root/boot_b-good.img
       LOG=/var/log/venus-bootfail.log
       {
         echo "===== $(date '+%F %T') 启动失败取证 (uname: $(uname -r), $(uname -v)) ====="
-        echo "--- ip -o addr ---"; ip -o addr
-        echo "--- pci 端点 ---"; for d in /sys/bus/pci/devices/*; do echo "$(basename $d) $(cat $d/vendor 2>/dev/null):$(cat $d/device 2>/dev/null) $(basename $(readlink $d/driver 2>/dev/null) 2>/dev/null)"; done | head -6
+        echo "--- ip -o addr ---"; ${pkgs.iproute2}/bin/ip -o addr
+        echo "--- pci 端点 ---"
+        for d in /sys/bus/pci/devices/*; do
+          echo "$(basename "$d") $(cat "$d/vendor" 2>/dev/null):$(cat "$d/device" 2>/dev/null) driver=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)"
+        done
         echo "--- dmesg 关键行 ---"
-        dmesg | grep -iE "pcie|ath11k|wcn|reg-userspace|link up|firmware" | tail -60
+        ${pkgs.util-linux}/bin/dmesg | grep -iE "pcie|ath11k|wcn|reg-userspace|link up|firmware|mhi" | tail -80
       } >> "$LOG" 2>&1
       [ -f "$GOOD" ] || { echo "没有 $GOOD，无法回滚" >> "$LOG"; exit 0; }
       n=$(cat /var/lib/venus-rollback-count 2>/dev/null || echo 0)
-      [ "$n" -ge 3 ] && { echo "已回滚 $n 次，停止" >> "$LOG"; exit 0; }
+      [ "$n" -ge 5 ] && { echo "已回滚 $n 次，停止" >> "$LOG"; exit 0; }
       echo $((n+1)) > /var/lib/venus-rollback-count
       echo "--- 回滚 boot_b ($GOOD) ---" >> "$LOG"
       dd if="$GOOD" of=/dev/sde38 bs=1M conv=fsync >> "$LOG" 2>&1

@@ -141,15 +141,19 @@ if 'ATH11K_HW_WCN6851_HW10' not in s:
 # b) pci.c: soc_hw_version_major == 1 → hw1.1
 p = D/'pci.c'; s = p.read_text()
 if 'ATH11K_HW_WCN6851_HW10' not in s:
-    old = "\t\tswitch (soc_hw_version_major) {\n\t\tcase 2:"
-    new = ("\t\tswitch (soc_hw_version_major) {\n"
+    # 注意：pci.c 里有两个 "switch (soc_hw_version_major)"（先 QCA6390、后 WCN6855），
+    # 必须插在后一个里 —— 插错了不报错但完全不生效（踩过一次）。
+    wcn = s.index('case WCN6855_DEVICE_ID:')
+    pat = "\t\tswitch (soc_hw_version_major) {\n\t\tcase 2:"
+    j = s.index(pat, wcn)
+    ins = ("\t\tswitch (soc_hw_version_major) {\n"
            "\t\tcase 1:\n"
            "\t\t\t/* WCN6851: SM8350 平台上的 WCN6855 早期版，自报 hw1.1 */\n"
            "\t\t\tab->hw_rev = ATH11K_HW_WCN6851_HW10;\n"
            "\t\t\tbreak;\n"
            "\t\tcase 2:")
-    if old in s:
-        s = s.replace(old, new, 1); p.write_text(s); changed.append('pci.c')
+    s = s[:j] + ins + s[j + len(pat):]
+    p.write_text(s); changed.append('pci.c')
 
 # c) mhi.c: 复用 qca6390 的 mhi 配置
 p = D/'mhi.c'; s = p.read_text()
@@ -239,7 +243,14 @@ chk 'DRM_PANEL_XIAOMI_VENUS_K2' "$ksrc/drivers/gpu/drm/panel/Kconfig"
 chk 'qcom_pcie_remove' "$ksrc/drivers/pci/controller/dwc/pcie-qcom.c"
 chk 'devm_regulator_bulk_get(' "$ksrc/drivers/regulator/userspace-consumer.c"
 chk '当作 disabled 处理' "$ksrc/drivers/regulator/userspace-consumer.c"
-chk 'ATH11K_HW_WCN6851_HW10' "$ksrc/drivers/net/wireless/ath/ath11k/pci.c"
+python3 - "$ksrc/drivers/net/wireless/ath/ath11k/pci.c" <<'PYCHK' || fail=1
+import sys, pathlib
+s = pathlib.Path(sys.argv[1]).read_text()
+w = s.index('case WCN6855_DEVICE_ID:')
+if s.find('ATH11K_HW_WCN6851_HW10', w) < 0:
+    print('补丁缺失: pci.c 的 WCN6851 case 不在 WCN6855 分支里', file=sys.stderr)
+    sys.exit(1)
+PYCHK
 chk 'wcn6855 hw1.1' "$ksrc/drivers/net/wireless/ath/ath11k/core.c"
 [ $fail -eq 0 ] || { echo "内核补丁自检失败" >&2; exit 1; }
 echo "内核补丁自检通过"

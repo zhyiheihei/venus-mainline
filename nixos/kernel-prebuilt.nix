@@ -26,6 +26,10 @@ kernel
   target = "Image";
   kernelOlder = lib.versionOlder "7.2.6";
   kernelAtLeast = lib.versionAtLeast "7.2.6";
+  # nixpkgs 内核包的其它常规属性：fleet 的内核模块会读 commonMakeFlags/makeFlags/stdenv
+  commonMakeFlags = [ ];
+  makeFlags = [ ];
+  stdenv = pkgs.stdenv;
 }
 // lib.optionalAttrs (builtins.pathExists configFile) {
   config = import ./kernel-config-parse.nix { inherit lib; } configFile;

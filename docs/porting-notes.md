@@ -2042,3 +2042,100 @@ git 类型 flake 看不到它们（这正是 tools/install-venus.sh 走 `path:$B
 
 下一步：定"板级产物从哪来"（进 attic/静态文件缓存，还是保持本机 `path:` 输入），
 再把 nixos-config 的 `hosts/venus` 接上（server 角色）。
+
+## 2026-11-10 · 板级模块当"上游"用：WiFi 交接与 NM 解耦 + 内核包补齐 nixpkgs 元数据
+
+目标：让 nixos-config（fleet，nixpkgs 是 unstable `26.11pre1105037.1c89083e451e`）能直接 import 本仓库的
+板级模块，形状对标 exam 的 `lt-rpi4`（`imports = [ inputs.nixos-hardware.nixosModules.raspberry-pi-4 ]` +
+`lantian.kernel = pkgs.callPackage (inputs.nixos-hardware + "/raspberry-pi/common/kernel.nix") { ... }`）。
+
+改动：
+
+- `nixos/venus-hardware.nix`：WiFi 交接不再硬绑 NetworkManager —— NM 开着时原样走 nmcli（独立装机走这条，
+  生成的 `/etc/venus-wifi-setup` **逐字节不变**）；NM 关着时只把 wlan0 上电，关联/地址交给主机的
+  networkd + wpa_supplicant（fleet 主机走这条，fleet 全局 `useNetworkd = true`、server 角色不开 NM）。
+- `nixos/kernel.nix`：预编译内核包补齐 nixpkgs 内核包的元数据，否则 unstable 求值过不去：
+  `config`（从产物目录的 `config` 解析出 `isSet/getValue/isYes/isNo/isModule/isEnabled/isDisabled`，
+  形状同 nixpkgs `pkgs/os-specific/linux/kernel/build.nix`）、`configfile`（unstable 的 sysctl 模块会读它）、
+  `target = "Image"`（`boot.loader.kernelFile` 的默认值取它）。
+- `tools/pack-kernel.sh`：把这次构建用的 `.config` 一并摆进 `nixos/kernel/`（供上面两个属性用）。
+
+验证：
+
+```bash
+# fleet 的 nixpkgs 直接求值通过（此前依次死在 logind/journald extraConfig → kernel.config → kernel.configfile → kernel.target）
+nix eval --raw --override-input nixpkgs \
+  'https://releases.nixos.org/nixos/unstable/nixos-26.11pre1105037.1c89083e451e/nixexprs.tar.zst' \
+  "path:$BUILD_ROOT#nixosConfigurations.venus.config.system.build.toplevel.drvPath"
+# → /nix/store/kvakn1xr789pf0zlbxvyp0zj6m8qn1v0-nixos-system-venus-26.11.19800101.dirty.drv
+
+# 25.05（设备装机路径）生成内容不变：/etc/venus-wifi-setup 文本逐字节一致；
+# 系统 drvPath 从 rky3bwgm 变成 qg5jwch7，原因是产物目录多了 config 文件（见下面的坑），不是配置漂移。
+```
+
+坑（重要）：往 `nixos/kernel/` 里加文件会改变 `${artifacts}` 这个**目录**的 store 路径 —— Nix 把整个目录
+当输入源（`srcs: ["<hash>-kernel"]`）。所以：
+
+1. 25.05 下 drvPath 变化是产物源目录变化，不是配置漂移（kernel 包只引用 `Image`/`mod/`/`modules.*`，构建内容不变）；
+2. 反过来解释了"仓库里的 gitignore 产物和发布态不一致 → 系统 store 路径对不上"：发布态用的是另一份产物目录。
+
+下一步（要拍板后再做）：板级产物（内核 Image/modules/DTB + 厂商固件）怎么进 fleet —— hash 钉住的 fetch
+（GitHub Release / fleet 静态文件缓存）还是本机 `path:` 输入；以及仓库里这份产物（OTG 实验版，
+Image `8b2924…`、缺 `panel-venus-k2-test`、多 hid/usb-storage/ucsi_glink，config 配 `linux-build/.config`）
+与设备/发布版（Image `b08a5eb2…`、含 `panel-venus-k2-test`）选哪份当基准。
+
+## 2026-11-10 · 内核改成"源码构建"recipe（exam 形态），预编译产物退居 P1 兜底
+
+exam（上游参考仓）里板级主机的内核都是**由源码构建**、config/patch/DTS 全在 git 里
+（lt-rpi4 = nixos-hardware 的 `raspberry-pi/common/kernel.nix`，用 `lantian.kernel` 注入；
+opi5p = 本仓 `pkgs/opi5p-kernel` 从 vendor 源构建）。本仓库按这个形态重构，产物分发/基准问题随之消失：
+
+- `nixos/kernel.nix`（新）：`pkgs.linuxManualConfig`。源码 = kernel.org 官方 tarball（sha256 与官方
+  `sha256sums` 一致；本地那份 `kernel/linux-7.2.6.tar.xz` 验过是同一个文件）；补丁走仓库里
+  `tools/apply-kernel-patches.sh`，DTS 用 `kernel/venus/sm8350-xiaomi-venus.dts`，内嵌 initramfs 用
+  nixpkgs 的 static busybox + 仓库里的 init（不再依赖 gitignore 掉的 busybox 二进制）。
+- `nixos/kernel-config`（新）：基线 config 入库（设备 `/proc/config.gz`，与 `tools/build-kernel.sh` 同源）。
+- `nixos/kernel-prebuilt.nix`：原预编译产物包，标注为 P1 兜底；补齐 nixpkgs 内核包元数据
+  （`target` / `kernelOlder` / `kernelAtLeast`，`linuxKernel.packagesFor` 会 inherit 后两个）。
+- `nixos/venus-hardware.nix`：**不再选内核**（对标 lt-rpi4）。设备装机在 `configuration.nix` 里写
+  `boot.kernelPackages = pkgs.linuxKernel.packagesFor (pkgs.callPackage ./kernel-prebuilt.nix { });`，
+  fleet 侧写 `lantian.kernel = pkgs.callPackage (inputs.venus-mainline + "/nixos/kernel.nix") { };`。
+
+验证（只求值，未构建）：
+
+```bash
+# 源码 recipe：fleet 的 unstable nixpkgs + aarch64 cross + packagesFor
+nix eval --impure --raw --expr 'let pkgs = import <unstable> { system = "x86_64-linux"; };
+  cross = pkgs.pkgsCross.aarch64-multiplatform;
+  in (cross.linuxKernel.packagesFor (cross.callPackage ./nixos/kernel.nix { })).kernel.drvPath'
+# → /nix/store/ahj6xnmzdjw99902inmhnzdp2ax9lmng-linux-venus-aarch64-unknown-linux-gnu-7.2.6.drv
+#   输入里能看到 linux-venus-7.2.6-src（打过补丁的源码树）与 venus-kernel-config（换过 initramfs 路径）
+
+# 设备装机路径（25.05）换成 packagesFor 后 system drvPath 与改前一致：qg5jwch7…
+# fleet unstable（设备路径）同样不变：kvakn1xr…
+```
+
+仍未解：P1（重建内核进不到用户态，需 early boot 串口）——设备继续用预编译产物那版内核；
+串口通了以后把 `configuration.nix` 那行换成 `./kernel.nix`，源码构建就是新基线。
+
+坑：`callPackage` 会把包集里同名的属性注入 recipe 参数，recipe 里别把参数叫 `src`
+（nixpkgs 的 `src` 已改名 simple-revision-control，会直接报 "has been renamed"）。
+
+补记（同日）：源码 recipe 与两条内核路径都在**整机 NixOS 求值**里验过：
+
+```bash
+# fleet（unstable）+ 源码构建内核（把 configuration.nix 那行换成 ./kernel.nix）
+nix eval --impure --override-input nixpkgs <unstable> --expr '(builtins.getFlake "path:$PWD").nixosConfigurations.venus.config.system.build.toplevel.drvPath'
+# → /nix/store/9y6b9sqwmjg1rpsmnsxjrb3w4dlwhm8r-nixos-system-venus-26.11.20260914.efe6f07.drv
+
+# 设备路径（预编译内核）两条 nixpkgs 都没变：25.05 → qg5jwch7…；unstable → kvakn1xr…
+```
+
+两个坑（都是 `callPackage` 造成的，记下来免得再踩）：
+
+1. recipe 的参数别叫 `src` —— callPackage 会把包集里的 `src`（已改名 simple-revision-control）注入进来，直接报 "has been renamed"。
+2. recipe 的参数表必须留 `...` —— NixOS 的 `boot.kernelPackages` 会用 `.override` 传入
+   `randstructSeed`/`kernelPatches`/`features`（nixos/modules/system/boot/kernel.nix:76），
+   参数表封闭就会 "called with unexpected argument 'features'"。这三个参数本 recipe 只接住不转发
+   （内核补丁与特性由 recipe 定死）；反过来，别把它们转给 `linuxManualConfig`，
+   会撞上 "expected a list but found a set"（features 集合被当成 kernelPatches）。

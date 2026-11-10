@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 收集自建内核产物（Image + 全部模块 + modinfo）到 nixos/kernel/，
-# 供 nixos/kmods-package.nix 打包成标准 /lib/modules/7.2.6 布局。
+# 收集自建内核产物（Image + .config + 全部模块 + modinfo）到 nixos/kernel/，
+# 供 nixos/kmods-package.nix 打包成标准 /lib/modules/7.2.6 布局；
+# .config 同时给 nixos/kernel.nix 当内核包的 configfile/config（别的 nixpkgs 版本要用）。
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 build=${1:-$HOME/.cache/venus-kernel/linux-build}
@@ -8,6 +9,7 @@ out=$root/nixos/kernel
 
 chmod -R u+w "$out" 2>/dev/null || true; rm -rf "$out"; mkdir -p "$out/mod"
 install -m644 "$build/arch/arm64/boot/Image" "$out/Image"
+install -m644 "$build/.config" "$out/config"
 for f in modules.order modules.builtin modules.builtin.modinfo; do
   [ -f "$build/$f" ] && install -m644 "$build/$f" "$out/$f"
 done

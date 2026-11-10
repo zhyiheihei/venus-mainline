@@ -5,7 +5,7 @@
 #   （stage-1 默认找 <root>/init，而 --no-bootloader 安装不会创建这个链接）
 # 因此不安装 bootloader。
 
-{ config, lib, pkgs, modulesPath, ... }:
+{ config, lib, modulesPath, options, pkgs, ... }:
 
 let
   wifiIp = "<LAN_PHONE_IP>";
@@ -14,6 +14,12 @@ let
 in
 {
   imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
+
+  # ---------- 内核 ----------
+  # P1（重建内核进不到用户态，见 docs/hardware-status.md）没解开前，设备用设备上正在跑的
+  # 那份预编译产物；解开后换成：
+  #   boot.kernelPackages = pkgs.linuxKernel.packagesFor (pkgs.callPackage ./kernel.nix { });
+  boot.kernelPackages = pkgs.linuxKernel.packagesFor (pkgs.callPackage ./kernel-prebuilt.nix { });
 
   # ---------- 网络 ----------
   networking.hostName = "venus";
@@ -124,11 +130,22 @@ in
   };
   security.sudo.wheelNeedsPassword = false;
   # ---------- 日志：持久化 + 限额（标准 systemd 行为）----------
-  services.journald.extraConfig = ''
-    Storage=persistent
-    SystemMaxUse=256M
-    SystemMaxFileSize=32M
-  '';
+  # 25.05 只有 extraConfig；unstable 只剩 settings.Journal（同样按 settings 是否存在选分支）
+  services.journald =
+    lib.optionalAttrs (!(options ? services.journald.settings)) {
+      extraConfig = ''
+        Storage=persistent
+        SystemMaxUse=256M
+        SystemMaxFileSize=32M
+      '';
+    }
+    // lib.optionalAttrs (options ? services.journald.settings) {
+      settings.Journal = {
+        Storage = "persistent";
+        SystemMaxUse = "256M";
+        SystemMaxFileSize = "32M";
+      };
+    };
 
   # ---------- HiDPI ----------
   # 缩放只由 Plasma 自己管（kscreen-doctor 已经写入用户的 kwinoutputconfig.json：

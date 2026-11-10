@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, options, pkgs, ... }:
 
 let
   # 从 Android 的 modem 分区提取出来的厂商固件（bdwlan ELF 当 board.bin 用，
@@ -86,10 +86,14 @@ in
       # 关掉省电：ath11k 在 PS 模式下会偶发丢流量（表现为拿到地址后 ping 不通）
       ${pkgs.iw}/bin/iw dev wlan0 set power_save off 2>/dev/null || true
 
-      # 5) 交给 NetworkManager：固定 MAC 之后让 NM 接管 wlan0 并连上保存的连接
-      ${pkgs.networkmanager}/bin/nmcli device set wlan0 managed yes 2>/dev/null || true
-      ${pkgs.networkmanager}/bin/nmcli connection up venus-wifi 2>/dev/null || \
-        ${pkgs.networkmanager}/bin/nmcli connection up <WIFI_SSID> 2>/dev/null || true
+      ${lib.optionalString config.networking.networkmanager.enable (lib.concatStringsSep "\n" [
+        "# 5) 交给 NetworkManager：固定 MAC 之后让 NM 接管 wlan0 并连上保存的连接"
+        "${pkgs.networkmanager}/bin/nmcli device set wlan0 managed yes 2>/dev/null || true"
+        "${pkgs.networkmanager}/bin/nmcli connection up venus-wifi 2>/dev/null || \\"
+        "  ${pkgs.networkmanager}/bin/nmcli connection up <WIFI_SSID> 2>/dev/null || true"
+      ])}${lib.optionalString (!config.networking.networkmanager.enable) ''
+        ${pkgs.iproute2}/bin/ip link set wlan0 up
+      ''}
 
       # 6) 等拿地址（NM 管 DHCP/静态；我们声明的是静态 <LAN_PHONE_IP>）
       i=0; while [ $i -lt 40 ]; do
@@ -251,14 +255,30 @@ in
   systemd.targets.suspend-then-hibernate.enable = false;
 
   # 电源键/休眠键一律不理
-  services.logind.extraConfig = ''
-    HandlePowerKey=ignore
-    HandlePowerKeyLongPress=ignore
-    HandleLidSwitch=ignore
-    HandleSuspendKey=ignore
-    HandleHibernateKey=ignore
-    IdleAction=ignore
-  '';
+  # 25.05 的 nixpkgs 只有 extraConfig；unstable 只剩 settings.Login（并留了一个会断言失败的 extraConfig stub，不能靠它判断）。
+  # 板级模块两边都要能用（本仓库独立装机走 25.05，nixos-config 走 unstable），
+  # 以 settings 是否存在来选分支。
+  services.logind =
+    lib.optionalAttrs (!(options ? services.logind.settings)) {
+      extraConfig = ''
+        HandlePowerKey=ignore
+        HandlePowerKeyLongPress=ignore
+        HandleLidSwitch=ignore
+        HandleSuspendKey=ignore
+        HandleHibernateKey=ignore
+        IdleAction=ignore
+      '';
+    }
+    // lib.optionalAttrs (options ? services.logind.settings) {
+      settings.Login = {
+        HandlePowerKey = "ignore";
+        HandlePowerKeyLongPress = "ignore";
+        HandleLidSwitch = "ignore";
+        HandleSuspendKey = "ignore";
+        HandleHibernateKey = "ignore";
+        IdleAction = "ignore";
+      };
+    };
   # ---------- 电源/性能策略：跟随主线，不自己造开关 ----------
   # 事实：主线 arm64 的 platform_profile 提供者只有笔记本 EC（Acer/Huawei/Lenovo/Hamoa），
   # 同 CPU 的主线机型（sagami / mtp / hdk / star）都没有，所以它们也没有可用的
@@ -316,21 +336,10 @@ in
       echo 128 > "$B" 2>/dev/null || true
     '';
   };
-  # ---------- 标准内核布局：自建内核 + 模块交给 NixOS ----------
-  # 这样 /lib/modules/7.2.6 存在、modprobe 可用，initrd 也能用 kernelModules 早期加载显示模块。
-  # NixOS 要求 modulesTree 里只有一个内核版本；我们的模块是 7.2.6，
-  # 所以把 kernelPackages.kernel 指向这个包（带 modDirVersion/features 等元数据）。
-  boot.kernelPackages = lib.mkDefault (let
-    kernel = pkgs.callPackage ./kernel.nix { };
-    base = {
-      inherit kernel;
-      kernelAtLeast = v: lib.versionAtLeast "7.2.6" v;
-      kernelOlder = v: lib.versionOlder "7.2.6" v;
-      stdenv = pkgs.stdenv;
-    };
-  in base // {
-    extend = f: base // f base base;
-  });
+  # ---------- 标准内核布局 ----------
+  # 内核包由调用方定，本模块不选内核（对标 lt-rpi4：内核在主机配置里用 lantian.kernel 指定）：
+  #   - 设备装机：configuration.nix 里走 nixos/kernel-prebuilt.nix（设备上跑的那份预编译产物，P1 未解）
+  #   - fleet/正常构建：lantian.kernel = pkgs.callPackage (inputs.venus-mainline + "/nixos/kernel.nix") { }
   # 早期 KMS：stage-1 就点亮面板，之后 stage-1/stage-2 的日志都能显示在屏幕上
   # 我们的内核把 UFS/ext4 等都编成内建，不需要 initrd 里的块设备模块；
   # 但 NixOS 默认会要求 ext2 模块，这里显式限定成我们自己的模块集。

@@ -8,7 +8,10 @@
 - ROM 包(fastboot 完整包/OTA zip)与官方镜像常备 ~/mi11-work/,官方恢复路径已在 2026-10-23 实证(EvoX First Time Install,见 porting-notes)
 - 厂商固件文件不进 git,只落本机 `/lib/firmware`
 - flake 用 flake-parts；导出 `nixosModules.venus`（板级模块）和 `nixos/kernel.nix`（内核 recipe）两个口子，
-  nixos-config 等外部仓库当“上游板级支持”引用它们（对标那边的 `inputs.nixos-hardware` + lt-rpi4）
+  nixos-config 等外部仓库当“上游板级支持”引用它们（对标那边的 `inputs.nixos-hardware` + lt-rpi4）：
+  模块不选内核（调用方 `lantian.kernel = pkgs.callPackage (inputs.venus-mainline + "/nixos/kernel.nix") { }`，
+  设备装机走 `boot.kernelPackages = … (pkgs.callPackage ./kernel-prebuilt.nix { })`）；
+  板级模块不硬绑 NetworkManager（NM 开着走 nmcli，关着只上电、交给主机的 networkd+wpa_supplicant）
 - 每个 milestone 完成后在 docs/porting-notes.md 追加日志,引用实际输出为证;**日志读取走 misc 分区通道(init 每 15s 写 dmesg 到 misc 偏移 4KB 起),recovery sideload 读出**
 - git 提交用 conventional commits,中文说明原因
 
@@ -20,17 +23,20 @@ kernel/venus/
   star-reference.dts          # Mi 11 Ultra 主线 DTS 存档（参考源）
   initramfs/init              # initramfs 的 /init（双系统引导：NixOS 优先，Alpine 兜底）
 nixos/
-  venus-hardware.nix          # 板级支持模块（内核包/initrd/固件/WiFi 上电+PCIe 重训/串口/背光/回滚/休眠屏蔽），导出为 nixosModules.venus
-  kernel.nix                  # 自建内核 recipe（artifacts 可参数化，供外部仓库接进自己的 kernelPackages）
-  kmods-package.nix           # 内核模块按 lib/modules/7.2.6 标准布局打包
-  configuration.nix           # 独立装机的薄壳（网络/SSH/用户/桌面/日志），imports ./venus-hardware.nix
+  venus-hardware.nix          # 板级支持模块（initrd/固件/WiFi 上电+PCIe 重训/串口/背光/回滚/休眠屏蔽），导出为 nixosModules.venus；不选内核
+  kernel.nix                  # 内核 recipe（exam 形态）：官方 tarball(hash 钉住) + 仓库里的 config/补丁/DTS，源码构建；fleet 走这条
+  kernel-prebuilt.nix         # 预编译产物打成内核包（P1 未解时的设备装机路径；产物由 tools/pack-kernel.sh 摆）
+  kernel-config               # 配置基线 = 设备上正在跑的 /proc/config.gz（与 tools/build-kernel.sh 同源）
+  kernel-config-parse.nix     # 把 .config 文本解析成 nixpkgs 内核包的 config 形状
+  kmods-package.nix           # 内核模块按 lib/modules/7.2.6 标准布局打包（kernel-prebuilt 用）
+  configuration.nix           # 独立装机的薄壳（内核选择/网络/SSH/用户/桌面/日志），imports ./venus-hardware.nix
   hardware-configuration.nix  # 根 = userdata 上的 ext4(LABEL=nixos)，noatime，无 swap
 tools/
   gen-venus-dts.py            # 从 star 参考生成 venus DTS（--stage 1|2 [--no-fb]）
   extract-firmware.sh         # 从本机 ~/mi11-work 提取固件到 nixos/firmware/
   apply-kernel-patches.sh     # 内核本地补丁（面板/触摸/pcie 重训/regulator/ath11k/vsync/battmgr）+ 末尾自检
   build-kernel.sh             # 编内核：基线取设备 /proc/config.gz → 打补丁 → Image+modules+dtbs → pack-kernel.sh
-  pack-kernel.sh              # 把 Image/modules/DTB 摆进 nixos/kernel（NixOS 内核包直接吃这个布局）
+  pack-kernel.sh              # 把 Image/`.config`/modules/DTB 摆进 nixos/kernel（NixOS 内核包直接吃这个布局）
   make-bootimg.sh             # 打 boot.img（header v1 + Image.gz + venus.dtb + 注入 preinit 的 initrd）
   vcmd.sh / vsh.sh            # 通过 WiFi ssh 在手机上执行/交互
   vpush.sh / vpull.sh         # tar over ssh 传文件（dropbear 没有 sftp，别用新 scp）

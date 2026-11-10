@@ -10,8 +10,10 @@ let
 in
 {
   # ---------- 引导 ----------
-  boot.loader.grub.enable = false;
-  boot.loader.generic-extlinux-compatible.enable = false;
+  # 板级事实：venus 不装 bootloader（系统由外部工具刷进 boot_b / 走 ABL），
+  # 用 mkForce 压掉调用方（例如 fleet 的 boot-params.nix 会开 grub）的默认值。
+  boot.loader.grub.enable = lib.mkForce false;
+  boot.loader.generic-extlinux-compatible.enable = lib.mkForce false;
   # 固件由内核从 /run/current-system/firmware 读取（NixOS 里固件是 .zst 压缩的，
   # 而我们的内核没开 FW_LOADER_COMPRESS，所以 venus-firmware 服务会先解压到 /var/lib/venus-fw）
   boot.kernelParams = [ "console=ttyGS0,115200" "consoleblank=0" ];

@@ -2,13 +2,23 @@
 
 let
   # 从 Android 的 modem 分区提取出来的厂商固件（bdwlan ELF 当 board.bin 用，
-  # ath11k 见 ELF 头会走 BDF_TYPE_ELF 分支并跳过 CAL 数据）
+  # ath11k 见 ELF 头会走 BDF_TYPE_ELF 分支并跳过 CAL 数据）。
+  # 这份 blobs 不进 git（upstream linux-firmware 只有 WCN6855 hw2.0/hw2.1，没有 venus 要的 hw1.1），
+  # 所以做成 option：本仓库装机用默认的 ./firmware，别的调用方（fleet）自己给一份来源。
   venusFirmware = pkgs.runCommandLocal "venus-firmware" { } ''
     mkdir -p $out/lib/firmware
-    cp -r ${./firmware}/. $out/lib/firmware/
+    cp -r ${config.venus.firmware}/. $out/lib/firmware/
   '';
 in
 {
+  options.venus.firmware = lib.mkOption {
+    type = lib.types.nullOr lib.types.path;
+    default = ./firmware;
+    description = "厂商固件目录（ath11k WCN6851 hw1.1 + qca BT 的 blobs）；null 表示不带固件。";
+  };
+
+  # 有 options 时其余配置必须落在 config 里
+  config = {
   # ---------- 引导 ----------
   # 板级事实：venus 不装 bootloader（系统由外部工具刷进 boot_b / 走 ABL），
   # 用 mkForce 压掉调用方（例如 fleet 的 boot-params.nix 会开 grub）的默认值。
@@ -367,5 +377,7 @@ in
   };
   # 显示驱动在内核里是 =m（避免 probe 卡死时连 /init 都起不来），
   # 这里按依赖顺序在开机时加载。
-  hardware.firmware = [ venusFirmware ];
+  hardware.firmware = lib.optionals (config.venus.firmware != null) [ venusFirmware ];
+
+  };
 }

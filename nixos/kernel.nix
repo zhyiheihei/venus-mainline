@@ -58,7 +58,7 @@ let
     printf 'CONFIG_INITRAMFS_SOURCE="%s"\n' ${initramfs} >> $out
   '';
 in
-pkgs.linuxManualConfig {
+pkgs.linuxKernel.manualConfig {
   pname = "linux-venus";
   inherit version configfile;
   modDirVersion = version;

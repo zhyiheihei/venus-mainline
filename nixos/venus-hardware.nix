@@ -140,56 +140,59 @@ in
     '';
   };
 
-  # ---- initrd 阶段就把 ACM 串口建起来：26.11 的 systemd-initrd 若在切换前失败，
-  # 用户空间永远起不来、stage-2 的 venus-acm 也就没机会跑，串口就一条日志都没有。
-  # 这一段只依赖 configfs + dwc3，放在 initrd.target 之前，失败也不影响正常引导。
-  boot.initrd.systemd.services.venus-acm-early = {
-    description = "venus: initrd 里建 ACM 串口";
+  # ---- initrd 里的串口看门狗：dwc3 在 initrd 里会重新 probe，configfs gadget 随之被拆掉，
+  # 一次性的建法只能维持几秒。这里常驻一个循环，谁把 gadget 拆了就重它建回来，
+  # 建好之后把 ttyGS0 交给交互 shell（内核 console 注册在开机时，那时端口还不存在，
+  # 不会自动跟随，必须主动起 shell 才拿得到现场）。
+  boot.initrd.systemd.services.venus-serial = {
+    description = "venus: initrd 串口看门狗 + 交互 shell";
     wantedBy = [ "initrd.target" ];
-    after = [ "systemd-modules-load.service" ];
     before = [ "initrd.target" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
-    script = ''
-      mkdir -p /sys/kernel/config
-      mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config || exit 0
-      # dwc3 在 initrd 里 probe 得晚，UDC 出现前建 gadget 会失败（EPERM/ENODEV），
-      # 这里等最多 30 秒，每出现就不退让地重试
-      n=0
-      while [ -z "$(ls /sys/class/udc 2>/dev/null)" ] && [ $n -lt 30 ]; do
-        sleep 1
-        n=$((n + 1))
-      done
-      UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-      [ -n "$UDC" ] || exit 0
-      G=/sys/kernel/config/usb_gadget/venus
-      mkdir -p "$G" "$G/strings/0x409" "$G/configs/c.1/strings/0x409"
-      echo 0x18d1 > "$G/idVendor"
-      echo 0x4ee1 > "$G/idProduct"
-      echo 0x0100 > "$G/bcdDevice"
-      echo 0x0200 > "$G/bcdUSB"
-      echo venus-m1 > "$G/strings/0x409/serialnumber"
-      echo Xiaomi > "$G/strings/0x409/manufacturer"
-      echo venus > "$G/strings/0x409/product"
-      echo ACM > "$G/configs/c.1/strings/0x409/configuration"
-      echo 250 > "$G/configs/c.1/MaxPower"
-      mkdir -p "$G/functions/acm.GS0"
-      ln -sf "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" || true
-      echo "$UDC" > "$G/UDC" || true
-    '';
-  };
-  # initrd 里的裸 shell：gadget 建好后把 ttyGS0 交给一个交互 shell。
-  # 内核 console 在开机时就注册，那时 ttyGS0 还不存在，所以后续 printk 不会
-  # 自动出现在串口上；要拿现场只能主动在这个端口上起 shell。
-  boot.initrd.systemd.services.venus-serial-shell = {
-    description = "venus: initrd 串口交互 shell";
-    wantedBy = [ "initrd.target" ];
-    after = [ "venus-acm-early.service" ];
     serviceConfig = {
       Type = "simple";
       Restart = "always";
-      RestartSec = 1;
-      ExecStart = "/bin/sh -c 'while [ ! -c /dev/ttyGS0 ]; do sleep 1; done; exec setsid sh -c \"exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1\"'";
+      RestartSec = 2;
     };
+    script = ''
+      G=/sys/kernel/config/usb_gadget/venus
+      mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config 2>/dev/null
+      while true; do
+        n=0
+        while [ -z "$(ls /sys/class/udc 2>/dev/null)" ] && [ $n -lt 60 ]; do
+          sleep 1
+          n=$((n + 1))
+        done
+        UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+        if [ -n "$UDC" ]; then
+          if [ ! -d "$G/functions/acm.GS0" ]; then
+            mkdir -p "$G" "$G/strings/0x409" "$G/configs/c.1/strings/0x409" 2>/dev/null
+            echo 0x18d1 > "$G/idVendor"
+            echo 0x4ee1 > "$G/idProduct"
+            echo 0x0100 > "$G/bcdDevice"
+            echo 0x0200 > "$G/bcdUSB"
+            echo venus-m1 > "$G/strings/0x409/serialnumber"
+            echo Xiaomi > "$G/strings/0x409/manufacturer"
+            echo venus > "$G/strings/0x409/product"
+            echo ACM > "$G/configs/c.1/strings/0x409/configuration"
+            echo 250 > "$G/configs/c.1/MaxPower"
+            mkdir -p "$G/functions/acm.GS0" 2>/dev/null
+            ln -sf "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" 2>/dev/null
+          fi
+          echo "" > "$G/UDC" 2>/dev/null
+          sleep 1
+          echo "$UDC" > "$G/UDC" 2>/dev/null
+          n=0
+          while [ ! -c /dev/ttyGS0 ] && [ $n -lt 15 ]; do
+            sleep 1
+            n=$((n + 1))
+          done
+          if [ -c /dev/ttyGS0 ]; then
+            setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' || true
+          fi
+        fi
+        sleep 5
+      done
+    '';
   };
 
   # ---- 串口在 systemd 启动后会丢（dwc3 重新 probe 把 configfs gadget 拆掉），

@@ -14,9 +14,10 @@ root="$here/.."
 kdir=$HOME/.cache/venus-kernel
 build=$kdir/linux-build
 cache=$kdir/nixos-initrd.bin
-work=$kdir/bootimg-work
+work=$(mktemp -d "${TMPDIR:-/tmp}/venus-bootimg.XXXXXX")
 
-mkdir -p "$kdir" "$work"
+mkdir -p "$kdir"
+trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT
 
 # 1) 内核 + DTB（默认现场编；KERNEL_IMAGE / DTB 给了就直接用）
 #    换机/离线安装时没有设备可取 initrd，用 INITRD=<initrd 文件> 指定

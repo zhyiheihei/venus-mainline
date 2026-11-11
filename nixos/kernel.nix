@@ -30,8 +30,14 @@ let
     ln -s busybox $out/bin/sh
     install -m755 ${../kernel/venus/initramfs/init} $out/init
   '';
-  # 内核侧改动（面板/触摸/pcie 重训/userspace-consumer/dpu/battmgr/ath11k）+ venus DTS：
-  # 直接调用仓库里那份幂等脚本，不做第二份实现
+  # 仓库里的内核改动（面板/触摸/pcie/regulator/dpu/battmgr/ath11k 补丁 + venus DTS）：
+  # 跑仓库那份幂等脚本。脚本用 "$here/.." 去找 kernel/venus/*，所以先把脚本与
+  # kernel/venus 按仓库布局摆进一个 store 目录（直接拿单文件会让 $root 指到 store 根）。
+  patchset = pkgs.runCommand "venus-patchset" { } ''
+    mkdir -p $out/tools $out/kernel
+    cp ${../tools/apply-kernel-patches.sh} $out/tools/apply-kernel-patches.sh
+    cp -r ${../kernel/venus} $out/kernel/venus
+  '';
   patchedSrc = pkgs.runCommand "linux-venus-${version}-src" {
     nativeBuildInputs = [ pkgs.python3 ];
   } ''
@@ -39,8 +45,8 @@ let
     tar xf ${src} --strip-components=1 -C source
     cd source
     export KSRC=$PWD
-    bash ${../tools/apply-kernel-patches.sh}
-    cp ${../kernel/venus/sm8350-xiaomi-venus.dts} arch/arm64/boot/dts/qcom/
+    bash ${patchset}/tools/apply-kernel-patches.sh
+    cp ${../kernel/venus/sm8350-xiaomi-venus.dts} arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dts
     sed -i '/sm8350-xiaomi-venus.dtb/d' arch/arm64/boot/dts/qcom/Makefile
     printf 'dtb-$(CONFIG_ARCH_QCOM)\t+= sm8350-xiaomi-venus.dtb\n' >> arch/arm64/boot/dts/qcom/Makefile
     cd ..

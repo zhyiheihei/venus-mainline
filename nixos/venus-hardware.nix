@@ -11,6 +11,21 @@ let
   '';
 in
 {
+  options.venus.rollbackImage = lib.mkOption {
+    type = lib.types.str;
+    default = "/root/boot_b-good.img";
+    description = "WiFi 起不来时自动回滚用的 boot.img（boot_b 会被它覆盖后重启）。";
+  };
+
+  options.venus.extraKernelModules = lib.mkOption {
+    type = lib.types.nullOr lib.types.path;
+    default = null;
+    description = ''
+      冻结内核缺的模块（zsmalloc/zram/dummy 等 .ko 所在目录的父路径，包内约定
+      modules/<name>.ko）。给 null 表示不加载。
+    '';
+  };
+
   options.venus.firmware = lib.mkOption {
     type = lib.types.nullOr lib.types.path;
     default = ./firmware;
@@ -19,6 +34,61 @@ in
 
   # 有 options 时其余配置必须落在 config 里
   config = {
+  # 冻结内核缺 zram/dummy 等模块，且不能走 boot.extraModulePackages（modules 聚合
+  # 脚本依赖 modules.cer，冻结工件里没有），所以开机直接 insmod。
+  systemd.services.venus-extra-modules = lib.mkIf (config.venus.extraKernelModules != null) {
+    description = "venus: 加载冻结内核缺失的模块并启用 zram swap";
+    # 不能写 Before=sysinit.target（与 WantedBy=sysinit.target 构成 ordering cycle，
+    # 会把 sysinit 整条链拖垮、开机停在无网无 journal 的状态，踩过两次）
+    wantedBy = [ "sysinit.target" ];
+    after = [ "systemd-modules-load.service" "systemd-udevd.service" ];
+    before = [ "systemd-networkd.service" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    path = with pkgs; [ kmod util-linux ];
+    script = ''
+      MODS=${config.venus.extraKernelModules}/modules
+      for m in zsmalloc zram dummy; do
+        [ -f "$MODS/$m.ko" ] || continue
+        insmod "$MODS/$m.ko" 2>/dev/null || true
+      done
+      # zram 交换：冻结内核里没有 zram-generator 需要的模块路径，这里按
+      # zramSwap.enable 的意图手工建一个 25% 内存的 zram0。
+      if [ -e /dev/zram0 ] && ! swapon --show=NAME --noheadings | grep -q zram0; then
+        while read -r k v _; do
+          [ "$k" = MemTotal: ] && mem=$v
+        done < /proc/meminfo
+        [ -n "''${mem:-}" ] && zramctl --find --size $((mem * 1024 / 4)) >/dev/null 2>&1 || true
+        mkswap /dev/zram0 >/dev/null 2>&1 && swapon /dev/zram0 || true
+      fi
+    '';
+  };
+
+  # ---------- 板级事实：wlan0 的 MAC 与 /dev/rfkill ----------
+  # WCN6851 的 BDF 没有有效 MAC，每次 probe 都随机；AP 对未知 MAC 直接
+  # AUTH-REJECT(status 1)，所以这里钉一个固定值（NM 那条路径用 cloned-mac-address）。
+  systemd.network.networks."10-wlan0".linkConfig.MACAddress =
+    lib.mkDefault "02:11:22:3c:4d:5e";
+  # wpa_supplicant 的沙箱要看到 /proc/sys/net，fleet 的 harden 档默认 ProcSubset=pid
+  # 会让 namespace 建不出来（226/NAMESPACE），这里按板子需要放宽这一项。
+  systemd.services."wpa_supplicant-wlan0" = lib.mkIf config.networking.wireless.enable {
+    serviceConfig = {
+      ProcSubset = lib.mkForce "all";
+      ProtectProc = lib.mkForce "default";
+    };
+  };
+  # devtmpfs 不建 /dev/rfkill，wpa_supplicant 会打 "rfkill: Cannot open RFKILL control device"
+  systemd.tmpfiles.rules = [ "c /dev/rfkill 0644 root root - 10:242" ];
+
+  # ---------- 板级内核能力：zram ----------
+  # kernel-config 里是 CONFIG_ZRAM=m，但设备上跑的是 nixos/kernel/ 那份冻结的预编译
+  # 模块集（pack-kernel 产物），里面没有 zram.ko，于是 zram-generator 的 modprobe 失败、
+  # dev-zram0.device 每轮等满 90s 超时，把 local-fs.target 和后续网络单元一起拖慢。
+  # 预编译内核补齐 zram.ko 之前，先关掉 zramSwap（fleet 的 hardening 模块会按
+  # swapDevices == [] 自动打开它，所以这里必须 mkForce）。
+  # 自己建 zram swap（见 venus-extra-modules），不用 zramSwap：它生成的
+  # dev-zram0.swap 会与我们的加载服务互相等待，形成 ordering cycle。
+  zramSwap.enable = lib.mkForce false;
+
   # ---------- 引导 ----------
   # 板级事实：venus 不装 bootloader（系统由外部工具刷进 boot_b / 走 ABL），
   # 用 mkForce 压掉调用方（例如 fleet 的 boot-params.nix 会开 grub）的默认值。
@@ -49,14 +119,21 @@ in
     wifi.powersave=2
   '';
   # ---------- 串口登录（USB ACM，WiFi 挂了也能进去）----------
+  # 沿用 nixpkgs 的 serial-getty 模板，只把 ExecStart 换成 autologin，
+  # 这样还能满足 lantian.harden 的策略断言（自建服务会被要求全套加固选项）。
   systemd.services."serial-getty@ttyGS0" = {
     enable = true;
     wantedBy = [ "getty.target" ];
     # gadget 由 venus-acm 在 systemd 里重建，必须先于 getty
     after = [ "venus-acm.service" ];
     requires = [ "venus-acm.service" ];
-    serviceConfig = { Restart = "always"; RestartSec = 1; };
+    serviceConfig = {
+      Restart = "always";
+      RestartSec = 3;
+      ExecStart = lib.mkForce "${pkgs.util-linux}/bin/agetty --autologin root --noclear -8 %I 115200";
+    };
   };
+
   # ---------- venus 专有：WiFi 上电 + PCIe 重训 + 网络 ----------
   # WiFi 上电/重训/关联逻辑写在 /etc 里，服务只负责把它丢到后台 —— 避免 16 秒阻塞启动
   environment.etc."venus-wifi-setup" = {
@@ -201,10 +278,31 @@ in
     description = "venus: 重建 USB ACM 串口 (console=ttyGS0)";
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-udev-settle.service" ];
+    # systemd 的最小 PATH 里没有 mount/mountpoint/mkdir/ln，之前因此挂掉
+    path = with pkgs; [ util-linux coreutils ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       mkdir -p /sys/kernel/config
       mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config || true
+
+      # initrd 里可能已经有一个 HID gadget 占着 UDC，必须先解绑并清掉，
+      # 否则我们的 ACM gadget 绑不上（journal: "Device or resource busy"），
+      # 主机侧就永远看不到 CDC ACM 串口。
+      for u in /sys/kernel/config/usb_gadget/*; do
+        [ -e "$u/UDC" ] || continue
+        echo "" > "$u/UDC" 2>/dev/null || true
+      done
+      for u in /sys/kernel/config/usb_gadget/*; do
+        [ -d "$u" ] || continue
+        for c in "$u"/configs/*/; do
+          [ -d "$c" ] || continue
+          for l in "$c"*; do [ -L "$l" ] && rm -f "$l"; done
+          rmdir "$c"/strings/* "$c" 2>/dev/null || true
+        done
+        for f in "$u"/functions/*; do [ -d "$f" ] && rmdir "$f" 2>/dev/null; done
+        rmdir "$u"/strings/* "$u" 2>/dev/null || true
+      done
+
       UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
       [ -n "$UDC" ] || { echo "没找到 UDC"; exit 0; }
       G=/sys/kernel/config/usb_gadget/venus
@@ -219,10 +317,13 @@ in
       echo ACM > "$G/configs/c.1/strings/0x409/configuration"
       echo 250 > "$G/configs/c.1/MaxPower"
       mkdir -p "$G/functions/acm.GS0"
-      ln -sf "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" || true
-      echo "$UDC" > "$G/UDC" || true
+      ln -sfn "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0"
+      echo "$UDC" > "$G/UDC"
+      sleep 2
+      echo "UDC=$UDC state=$(cat /sys/class/udc/$UDC/state 2>/dev/null)"
     '';
   };
+
 
   # ---- WiFi 掉线取证：把链路/地址/NM 状态周期性落到 /var/log/venus-net.log，
   # 这样即使串口掉了，下次也能从磁盘读到现场
@@ -258,8 +359,14 @@ in
 
   systemd.services.venus-wifi-power = {
     description = "venus: WiFi 上电、重训 PCIe、连 WiFi（后台执行，不阻塞启动）";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-udev-settle.service" "systemd-networkd.service" ];
+    # 这个服务负责让 wlan0 出现；它必须早于所有等网卡的单元（wpa_supplicant 的
+    # device job 默认只等 90s），否则网卡还没被 PCIe 重训出来就被判超时。
+    unitConfig.DefaultDependencies = false;
+    # 必须在任何"等 wlan0 设备"的 job（默认 90s 超时）之前把网卡弄出来，
+    # 否则 wpa_supplicant-wlan0 会直接 dependency fail。
+    wantedBy = [ "sysinit.target" ];
+    after = [ "venus-boot-activate.service" ];
+    before = [ "sysinit.target" ];
     # Type=oneshot 若同步跑完会把 multi-user/graphical 一起拖住（实测 16 秒）。
     # 这里只把设置脚本丢到后台就返回，启动流程不再等它。
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 20; };
@@ -290,7 +397,11 @@ in
         rm -f /var/lib/venus-rollback-count
         exit 0
       fi
-      GOOD=/root/boot_b-good.img
+      # 回滚镜像位置随部署形态不同：fleet 在 /nix/persistent，独立安装在 /persistent
+      GOOD=
+      for c in ${config.venus.rollbackImage} /nix/persistent/root/boot_b-good.img /persistent/root/boot_b-good.img /root/boot_b-good.img; do
+        [ -f "$c" ] && { GOOD=$c; break; }
+      done
       LOG=/var/log/venus-bootfail.log
       {
         echo "===== $(date '+%F %T') 启动失败取证 (uname: $(uname -r), $(uname -v)) ====="
@@ -307,7 +418,7 @@ in
       [ "$n" -ge 5 ] && { echo "已回滚 $n 次，停止" >> "$LOG"; exit 0; }
       echo $((n+1)) > /var/lib/venus-rollback-count
       echo "--- 回滚 boot_b ($GOOD) ---" >> "$LOG"
-      dd if="$GOOD" of=/dev/sde38 bs=1M conv=fsync >> "$LOG" 2>&1
+      dd if="$GOOD" of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync >> "$LOG" 2>&1
       sync
       systemctl reboot
     '';
@@ -412,6 +523,10 @@ in
   # 但 NixOS 默认会要求 ext2 模块，这里显式限定成我们自己的模块集。
   boot.initrd.availableKernelModules = lib.mkForce [ ];
   # initrd 里带显示模块：preinit 在 fbcon 解绑状态下加载它们（避开 probe 期间绘制导致死锁）
+  # venus 内核不构建 nullfsvfs，fleet 的 /run/nullfs 挂载会失败并把
+  # local-fs.target 一起拖下水（连带 venus-wifi-power 不启动）。其他 ARM 板同做法。
+  fileSystems."/run/nullfs".enable = lib.mkForce false;
+
   boot.initrd.kernelModules = [
     "qcom-refgen-regulator" "cec" "drm_display_helper" "drm_dp_aux_bus"
     "drm_exec" "drm_gpuvm" "gpu-sched" "mdt_loader" "ubwc_config"

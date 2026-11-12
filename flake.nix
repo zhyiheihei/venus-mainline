@@ -38,6 +38,8 @@
               # aarch64 交叉工具链
               pkgsCross.aarch64-multiplatform.buildPackages.gcc
               # 刷机用系统 PATH 里的 fastboot/adb,不重复打包
+              # 补丁脚本(apply-kernel-patches.sh)用 python3 做幂等改写
+              python3
               # 固件与参考资料处理
               jq
               curl

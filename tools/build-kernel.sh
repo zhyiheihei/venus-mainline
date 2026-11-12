@@ -15,7 +15,13 @@ OUT=$WORK/linux-build
 SRC=$WORK/$K
 BASE=$WORK/device.config
 ARCH=arm64
-CC=aarch64-unknown-linux-gnu-
+# 在 aarch64 主机上就是原生编译，交叉前缀不存在（devShell 里那份 pkgsCross 在
+# aarch64 上是 native），所以按主机架构选工具链前缀。
+if [ "$(uname -m)" = "aarch64" ]; then
+  CC=${CROSS_COMPILE:-}
+else
+  CC=${CROSS_COMPILE:-aarch64-unknown-linux-gnu-}
+fi
 JOBS=${MAKE_JOBS:-$(nproc)}
 PHONE_IP=${PHONE_IP:-192.168.0.150}
 

@@ -328,7 +328,9 @@ in
     };
     script = ''
       ${venusGadget}
-      venus_usb_gadget
+      mount -t configfs none /sys/kernel/config 2>/dev/null || true
+      venus_usb_create acm
+      venus_usb_bind
       n=0
       while [ ! -c /dev/ttyGS0 ] && [ $n -lt 20 ]; do
         sleep 1
@@ -340,27 +342,14 @@ in
   };
 
   systemd.services.venus-acm = {
-    description = "venus: 重建 USB ACM 串口 (console=ttyGS0)";
+    description = "venus: 记录 stage-2 后的 USB 状态（不重建，避免主机丢掉首次枚举）";
     path = with pkgs; [ util-linux coreutils bash ];
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-udev-settle.service" ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       ${venusGadget}
-      mount -t configfs none /sys/kernel/config 2>/dev/null || true
-      rm -rf /sys/kernel/config/usb_gadget/venus 2>/dev/null || true
-      venus_usb_create full
-      venus_usb_bind
-      i=0
-      while [ $i -lt 4 ]; do
-        [ -d /sys/class/net/usb0 ] && break
-        venus_usb_unbind
-        sleep 3
-        venus_usb_bind
-        sleep 4
-        i=$((i + 1))
-      done
-      venus_usb_log "stage-2 done ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
+      venus_usb_log "stage-2 noop cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) gadgets=[$(ls /sys/kernel/config/usb_gadget 2>/dev/null | tr '\n' ' ')] udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
     '';
   };
 

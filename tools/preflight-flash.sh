@@ -98,7 +98,7 @@ rsz=$(stat -c %s "$W/ub/ramdisk" 2>/dev/null || echo 0)
 
 # ---- 4) 打印将要执行的刷写计划 ----
 say ""
-say "刷写计划（人眼确认后用 install-venus.sh flash 或逐条执行）:"
+say "刷写计划（人眼确认后逐条执行）:"
 say "  fastboot flash boot_b  $(basename "$img")"
 say "  fastboot flash dtbo_b  dtbo-zero.img"
 say "  fastboot flash userdata rootfs.simg"

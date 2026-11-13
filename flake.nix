@@ -21,26 +21,20 @@
           ...
         }:
         {
-          # 内核交叉编译与刷机调试工具链
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
-              # 内核构建(host 侧工具)
               dtc
               openssl
-              ncurses # menuconfig
+              ncurses
               flex
               bison
               bc
               perl
               cpio
-              pahole # BTF
+              pahole
               rsync
-              # aarch64 交叉工具链
               pkgsCross.aarch64-multiplatform.buildPackages.gcc
-              # 刷机用系统 PATH 里的 fastboot/adb,不重复打包
-              # 补丁脚本(apply-kernel-patches.sh)用 python3 做幂等改写
               python3
-              # 固件与参考资料处理
               jq
               curl
             ];
@@ -48,11 +42,29 @@
         };
 
       flake = {
-        nixosModules.venus = ./nixos/venus-hardware.nix;
+        nixosModules.venus = {
+          imports = [
+            ./nixos/venus-hardware.nix
+            ./nixos/venus-fleet.nix
+          ];
+        };
         nixosConfigurations.venus = inputs.nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
           modules = [
             ./nixos/configuration.nix
+          ];
+        };
+
+        nixosConfigurations.venus-debug = inputs.nixpkgs.lib.nixosSystem {
+          system = "aarch64-linux";
+          modules = [
+            ./nixos/configuration.nix
+            ({ pkgs, ... }: {
+              venus.debug.enable = true;
+              boot.kernelPackages = inputs.nixpkgs.lib.mkForce (pkgs.linuxKernel.packagesFor (
+                pkgs.pkgsCross.aarch64-multiplatform.callPackage ./nixos/kernel.nix { debug = true; }
+              ));
+            })
           ];
         };
       };

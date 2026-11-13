@@ -1,62 +1,43 @@
 # venus-mainline
 
-小米11(venus,SM8350/骁龙888)主线 Linux / NixOS 适配项目。
+小米 11（venus，SM8350）的主线 Linux / NixOS 支持。
 
-## 目标
+## 给外部仓库用
 
-在无硬件串口、无 9008(EDL)救砖的条件下,以 `fastboot boot` 内存引导为安全兜底,把 mainline Linux 跑上 venus。最终形态:
+```nix
+inputs.venus-mainline.url = "github:<owner>/venus-mainline";
 
-1. headless NixOS:USB gadget 网络 + SSH,可用作小盒子
-2. 逐项点亮外设:WiFi → 屏幕 → 蜂窝/音频(远期)
+nixosConfigurations.<host>.modules = [ inputs.venus-mainline.nixosModules.venus ];
+```
 
-## 现状评估结论(2026-09 定稿)
+模块自带板级默认值：内核 recipe、固件、WiFi（systemd-networkd + wpa_supplicant）、
+USB ACM 串口控制台、RTC 同步、显示链路模块。fleet 侧不需要再写板级配置。
 
-| 层 | 状态 |
-| --- | --- |
-| SM8350 平台 | UFS/USB/CPU 调频/PCIe/DSI/GPU/remoteproc 已进主线;WiFi/BT 板级 2026-06 刚给 HDK 打补丁;音频/摄像头/视频硬解/GPS 空白 |
-| venus 设备 | 主线无 DTS;pmOS 标记 not booting(卡在 1440p DSC 面板 bpp=30);USB 与 regulator 已通 |
-| NixOS 侧 | Mobile NixOS 无 sm8350;走「自建内核 + 标准 NixOS rootfs」路线(参考 Vanilla Mobile NixOS 与 chayleaf 的 OnePlus 6 博客) |
-| 先行参考 | Sony Xperia 1 III(pdx215,同平台):pmOS 有 mainline port,USB 网络/屏幕/GPU 通,WiFi/蜂窝全空,跑 SD 卡(UFS 被禁)。venus 无 SD 卡槽,必须啃 UFS |
+内核单独取用：
 
-## 路线图
+```nix
+lantian.kernel = lib.mkForce (
+  pkgsCross.aarch64-multiplatform.callPackage (inputs.venus-mainline + "/nixos/kernel.nix") { }
+);
+```
 
-| 里程碑 | 内容 | 验收 |
-| --- | --- | --- |
-| M0 | 电脑备一份 LOS venus 完整 fastboot 包(或小米线刷包);不做分区备份 | ROM 包在盘 |
-| M1 | mainline 内核 + sagami DTS 起步改造,`fastboot boot` 引导 | initramfs 里 USB 网络可用,可进 debug shell |
-| M2 | UFS 实测:只读确认分区、检查稳定性 | 具备落盘条件 |
-| M3 | NixOS rootfs + USB NCM + SSH | headless 可用,`nixos-rebuild` 闭环 |
-| M4 | USB 转以太网网卡 | 独立联网保底 |
-| M5 | WiFi:等 sm8350-hdk WiFi 补丁进主线,写 venus 供电/PCIe DTS,从 LOS 固件包提取 boardfile | wpa_supplicant 关联成功 |
-| M6 | 面板(1440p DSC bpp=30,独立战线,最大硬骨头) | 亮屏 |
+交叉使用时编译器进程在 x86_64 上原生执行，产物 hostPlatform 仍是 aarch64-linux。
 
-蜂窝/音频/摄像头列为远期,不进当前路线图。
+## 本机独立启机
 
-## 红线(守住则永远不需要 9008)
+```bash
+tools/make-bootimg.sh /tmp/boot.img         # Image.gz + venus.dtb + 本机 initrd
+tools/preflight-flash.sh /tmp/boot.img      # 刷前自检 + 打印刷写计划
+```
 
-绝不 flash:`xbl*`、`xbl_config*`、`abl`、`tz`、`hyp`、`keymaster`、`devcfg`、`cmnlib*`、`qupfw`、`imagefv`、`persist`、`modemst1/2`、GPT 分区表。这些里 persist/modemst 不可再生,其余在 ROM 包里都有镜像。
+刷写走 Windows 主机（`tools/win.sh`），只写 `boot_b`：
 
-可折腾:`boot_a/b`、`dtbo_a/b`、`vendor_boot_a/b`、`vbmeta_a/b`(带 `--disable-verity --disable-verification`)、`userdata`。
+```bash
+tools/win.sh "fastboot flash boot_b /path/boot.img && fastboot reboot"
+```
 
-日常测试用 `fastboot boot boot.img`(内存引导,零永久风险)。单系统策略:不留原厂,userdata 全量给 rootfs,boot 分区随便用;ROM 包即全量回退手段。
+## 红线
 
-## 目录
-
-| 路径 | 说明 |
-| --- | --- |
-| `hosts/venus/` | NixOS aarch64 headless 配置 |
-| `kernel/` | mainline 内核构建(patch 集与 config,M1 落地) |
-| `firmware/` | 固件提取说明(M5 落地) |
-| `docs/porting-notes.md` | 移植日志 |
-
-ROM 包存本机不入 git。不做分区备份(2026-09 决策:不留原系统,可写分区均可从 ROM 包再生)。
-
-## 参考
-
-- pmOS venus 页面:https://wiki.postmarketos.org/wiki/Xiaomi_Mi_11_(xiaomi-venus)
-- pmOS pdx215 页面:https://wiki.postmarketos.org/wiki/Sony_Xperia_1_III_(sony-pdx215)
-- SM8350 平台主线状态:https://linux-msm.github.io/mainline-status/soc/sm8350
-- Vanilla Mobile NixOS:https://github.com/vanilla-mobile-nixos/vanilla-mobile-nixos
-- chayleaf OnePlus 6 NixOS 博客:https://pavluk.org/blog/2023/12/19/oneplus_6.html
-- Matrix:`#sm8350-mainlining:matrix.org`
-- 小米 venus 下游内核开源树:MiCode/kernel_devicetree `venus-r-oss`(面板时序参考)
+绝不 flash：`xbl*`、`xbl_config*`、`abl`、`tz`、`hyp`、`keymaster`、`devcfg`、
+`cmnlib*`、`qupfw`、`imagefv`、`persist`、`modemst1/2`、GPT 分区表。
+可写：`boot_a/b`、`dtbo_a/b`、`vendor_boot_a/b`、`vbmeta_a/b`、`userdata`。

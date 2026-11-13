@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# 打包 venus 的 boot.img：Image.gz + venus.dtb + NixOS 官方 initrd(注入 preinit)
-#
-# 用法: tools/make-bootimg.sh <输出镜像路径> [内核 cmdline 附加项...]
-# 前置: 设备在线(WiFi ssh 可达)，用它的 /run/current-system/initrd 作为 ramdisk；
-#       缓存放在 ~/.cache/venus-kernel/nixos-initrd.bin，可用 REFRESH=1 强制刷新。
 set -euo pipefail
 out=${1:?'usage: make-bootimg.sh <out.img> [extra cmdline...]'}
 shift || true
@@ -19,8 +14,6 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/venus-bootimg.XXXXXX")
 mkdir -p "$kdir"
 trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT
 
-# 1) 内核 + DTB（默认现场编；KERNEL_IMAGE / DTB 给了就直接用）
-#    换机/离线安装时没有设备可取 initrd，用 INITRD=<initrd 文件> 指定
 KERNEL_IMAGE=${KERNEL_IMAGE:-}
 DTB=${DTB:-}
 INITRD=${INITRD:-}
@@ -35,7 +28,6 @@ fi
 KERNEL_IMAGE=${KERNEL_IMAGE:-$build/arch/arm64/boot/Image}
 DTB=${DTB:-$build/arch/arm64/boot/dts/qcom/sm8350-xiaomi-venus.dtb}
 
-# 2) NixOS initrd（带缓存；INITRD= 指定时直接用）
 if [ -n "$INITRD" ]; then
   cache=$INITRD
 elif [ "${REFRESH:-0}" = "1" ] || [ ! -s "$cache" ]; then
@@ -45,7 +37,6 @@ elif [ "${REFRESH:-0}" = "1" ] || [ ! -s "$cache" ]; then
   mv -f "$work/nixos-initrd.bin" "$cache"
 fi
 
-# 3) 解包 -> 注入 preinit -> 重打包
 echo "== 注入 preinit =="
 rm -rf "$work/ird" 2>/dev/null || true; mkdir -p "$work/ird"
 ( cd "$work/ird" && zstd -dc "$cache" 2>/dev/null | cpio -id --no-absolute-filenames --quiet 2>/dev/null )
@@ -55,12 +46,6 @@ eu=$(ls -d "$work/ird"/nix/store/*extra-utils* 2>/dev/null | head -1)
 eu_rel=${eu#"$work/ird"}
 
 cat > "$work/ird/venus-preinit.sh" <<EOS
-#! $eu_rel/bin/ash
-# venus preinit（v129 形态，实测可重复启动）：
-#   1) 加载显示链路模块（fbcon 此时仍绑在 simpledrm 上，cmdline 只把日志送串口，
-#      所以 msm 加载期间没有任何 fbcon 绘制 → 不会等不存在的 TE）
-#   2) 建 USB ACM gadget，让 console=ttyGS0 可用
-#   3) 原样交给 NixOS stage-1
 export PATH=$eu_rel/bin
 export LD_LIBRARY_PATH=$eu_rel/lib
 
@@ -94,10 +79,8 @@ if [ -n "\$UDC" ]; then
   sleep 1
 fi
 
-# 固件搜索路径（NixOS 的 .zst 固件在 /run/current-system/firmware）
 echo /run/current-system/firmware > /sys/module/firmware_class/parameters/path 2>/dev/null
 
-# 自愈: 根文件系统上的 /init（按标签找根, 不写死分区号 —— 8GB/12GB 机型 sda 编号可能不同）
 mkdir -p /fixroot
 ROOTDEV=""
 for d in /dev/sd*; do
@@ -117,14 +100,9 @@ fi
 
 exec $stage1
 EOS
-# 蓝牙固件必须能"在 1.6s probe 时"取到：hci_qca 在设备打开时会立刻下载
-# qca/hpbtfw10.tlv，那时 preinit 还没跑、firmware_class.path 还没指向 /run/current-system。
-# 主线笔记本机型（sc8280xp 等）就是靠"固件在 initrd 里"满足这一点；我们照做，
-# 把固件放在 initrd 的 /venus-fw，并用 cmdline 的 firmware_class.path 指过去。
 rm -rf "$work/ird/venus-fw"; mkdir -p "$work/ird/venus-fw/qca"
 cp "$root"/nixos/firmware/qca/hpbtfw10.tlv "$root"/nixos/firmware/qca/hpbtfw21.tlv \
    "$root/nixos/firmware/qca/hpnv10."* "$work/ird/venus-fw/qca/" 2>/dev/null || true
-# 驱动先试 wcn 前缀、再试 hp 前缀，两种命名都备一份
 for f in "$work/ird/venus-fw/qca/"hp*; do
   b=$(basename "$f"); cp "$f" "$work/ird/venus-fw/qca/wcn$b" 2>/dev/null || true
 done
@@ -133,18 +111,19 @@ chmod +x "$work/ird/venus-preinit.sh"
 rm -f "$work/ird/init" 2>/dev/null || true; ln -s /venus-preinit.sh "$work/ird/init"
 ( cd "$work/ird" && find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9 > "$work/initrd.cpio.gz" )
 
-# 4) 拼接 + mkbootimg
 echo "== mkbootimg =="
 gzip -9 -c "$KERNEL_IMAGE" > "$work/Image.gz"
 cat "$work/Image.gz" "$DTB" > "$work/Image.gz-dtb"
 
-# init= 默认写 profile 路径，但 profile 是可变的（救援系统启动就会把它改回自己），
-# 于是"刷完新内核再重启"会去跑上一套系统、报找不到闭包。INIT_PATH 允许钉死
-# 绝对闭包路径（NixOS 自己生成 boot loader 条目时也是这么写的）。
 init_path=${INIT_PATH:-/nix/var/nix/profiles/system/init}
+debug_params=""
+if [ "${DEBUG:-0}" = "1" ]; then
+  debug_params="loglevel=8 ignore_loglevel pstore.backend=ramoops oops=panic panic=30 printk.always_kmsg_dump=1 systemd.log_level=debug systemd.journald.forward_to_console=1 boot.shell_on_fail sysrq_always_enabled=1"
+fi
+
 cmdline="firmware_class.path=/venus-fw console=tty0 console=ttyGS0,115200 init=$init_path \
 net.ifnames=0 loglevel=7 \
-regulator_ignore_unused pd_ignore_unused clk_ignore_unused $extra"
+regulator_ignore_unused pd_ignore_unused clk_ignore_unused $debug_params $extra"
 
 PYTHONPATH=$HOME/.cache/mkbootimg python3 "$HOME/.cache/mkbootimg/mkbootimg.py" \
   --header_version 1 --kernel "$work/Image.gz-dtb" --ramdisk "$work/initrd.cpio.gz" \

@@ -9,11 +9,48 @@ let
     venus_usb_log() {
       echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> /persistent/venus-usb-state.log 2>/dev/null || true
     }
+    venus_usb_create() {
+      mode=''${1:-acm}
+      G=/sys/kernel/config/usb_gadget/venus
+      mkdir -p "$G" "$G/functions/acm.GS0" || true
+      [ "$mode" = full ] && mkdir -p "$G/functions/rndis.usb0" || true
+      echo 0x18d1 > "$G/idVendor" || true
+      echo 0x4ee1 > "$G/idProduct" || true
+      echo 0x0100 > "$G/bcdDevice" || true
+      echo 0x0200 > "$G/bcdUSB" || true
+      mkdir -p "$G/strings/0x409" || true
+      echo venus-m1 > "$G/strings/0x409/serialnumber" || true
+      echo Xiaomi > "$G/strings/0x409/manufacturer" || true
+      echo venus > "$G/strings/0x409/product" || true
+      mkdir -p "$G/configs/c.1/strings/0x409" || true
+      echo "ACM" > "$G/configs/c.1/strings/0x409/configuration" || true
+      echo 250 > "$G/configs/c.1/MaxPower" || true
+      rm -f "$G/configs/c.1/acm.GS0" "$G/configs/c.1/rndis.usb0"
+      ln -s "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" || true
+      if [ "$mode" = full ]; then
+        ln -s "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0" || true
+        echo "ACM+RNDIS" > "$G/configs/c.1/strings/0x409/configuration" || true
+      fi
+    }
+    venus_usb_bind() {
+      UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+      [ -n "$UDC" ] || { venus_usb_log "no udc"; return 1; }
+      echo "$UDC" > /sys/kernel/config/usb_gadget/venus/UDC 2>/dev/null || true
+      sleep 1
+      venus_usb_log "bind UDC=$UDC state=$(cat /sys/class/udc/$UDC/state 2>/dev/null)"
+    }
+    venus_usb_unbind() {
+      UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+      [ -n "$UDC" ] || return 0
+      echo "" > /sys/kernel/config/usb_gadget/venus/UDC 2>/dev/null || true
+      sleep 1
+      venus_usb_log "unbind UDC=$UDC state=$(cat /sys/class/udc/$UDC/state 2>/dev/null)"
+    }
     venus_usb_gadget() {
       force=''${1:-}
       mount -t configfs none /sys/kernel/config 2>/dev/null || true
       G=/sys/kernel/config/usb_gadget/venus
-      venus_usb_log "enter force=$force cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) gadgets=[$(ls /sys/kernel/config/usb_gadget 2>/dev/null | tr '\n' ' ')] udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no)"
+      venus_usb_log "enter force=$force cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) gadgets=[$(ls /sys/kernel/config/usb_gadget 2>/dev/null | tr '\n' ' ')] udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
 
       if [ "$force" != force ] && [ -s "$G/UDC" ] && [ "$(cat /sys/class/udc/$(cat "$G/UDC")/state 2>/dev/null)" = "configured" ]; then
         echo "gadget 已配置: UDC=$(cat "$G/UDC")"
@@ -29,29 +66,8 @@ let
         done
       done
 
-      UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-      [ -n "$UDC" ] || { echo "没有 UDC"; return 1; }
-
-      mkdir -p "$G" "$G/functions/acm.GS0"
-      echo 0x18d1 > "$G/idVendor"
-      echo 0x4ee1 > "$G/idProduct"
-      echo 0x0100 > "$G/bcdDevice"
-      echo 0x0200 > "$G/bcdUSB"
-      mkdir -p "$G/strings/0x409"
-      echo venus-m1 > "$G/strings/0x409/serialnumber"
-      echo Xiaomi > "$G/strings/0x409/manufacturer"
-      echo venus > "$G/strings/0x409/product"
-      mkdir -p "$G/configs/c.1/strings/0x409"
-      echo "ACM" > "$G/configs/c.1/strings/0x409/configuration"
-      echo 250 > "$G/configs/c.1/MaxPower"
-      rm -f "$G/configs/c.1/acm.GS0"
-      ln -s "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0"
-
-      echo "$UDC" > "$G/UDC" 2>/dev/null || true
-      sleep 2
-      msg="UDC=$UDC state=$(cat /sys/class/udc/$UDC/state 2>/dev/null)"
-      echo "$msg"
-      venus_usb_log "bind $msg force=$force"
+      venus_usb_create
+      venus_usb_bind
     }
   '';
 
@@ -301,16 +317,25 @@ in
   };
 
   boot.initrd.systemd.services.venus-serial = {
-    description = "venus: 记录 initrd 阶段的 USB 状态（不建 gadget）";
+    description = "venus: initrd 建 ACM gadget 并挂 shell";
     path = with pkgs; [ util-linux coreutils bash ];
     wantedBy = [ "initrd.target" ];
     before = [ "initrd.target" ];
     serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
+      Type = "simple";
+      Restart = "always";
+      RestartSec = 5;
     };
     script = ''
-      venus_usb_log "initrd: cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')]"
+      ${venusGadget}
+      venus_usb_gadget
+      n=0
+      while [ ! -c /dev/ttyGS0 ] && [ $n -lt 20 ]; do
+        sleep 1
+        n=$((n + 1))
+      done
+      [ -c /dev/ttyGS0 ] || exit 1
+      exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1
     '';
   };
 
@@ -322,7 +347,20 @@ in
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       ${venusGadget}
-      venus_usb_gadget force
+      mount -t configfs none /sys/kernel/config 2>/dev/null || true
+      rm -rf /sys/kernel/config/usb_gadget/venus 2>/dev/null || true
+      venus_usb_create full
+      venus_usb_bind
+      i=0
+      while [ $i -lt 4 ]; do
+        [ -d /sys/class/net/usb0 ] && break
+        venus_usb_unbind
+        sleep 3
+        venus_usb_bind
+        sleep 4
+        i=$((i + 1))
+      done
+      venus_usb_log "stage-2 done ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
     '';
   };
 

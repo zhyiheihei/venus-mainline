@@ -331,6 +331,9 @@ in
       mount -t configfs none /sys/kernel/config 2>/dev/null || true
       venus_usb_create acm
       venus_usb_bind
+      mkdir -p /run/venus-configfs
+      mount --bind /sys/kernel/config /run/venus-configfs 2>/dev/null || true
+      venus_usb_log "bind-mount configfs -> /run/venus-configfs ok=$([ -d /run/venus-configfs/usb_gadget/venus ] && echo yes || echo no)"
       n=0
       while [ ! -c /dev/ttyGS0 ] && [ $n -lt 20 ]; do
         sleep 1

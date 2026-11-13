@@ -59,12 +59,14 @@
           system = "aarch64-linux";
           modules = [
             ./nixos/configuration.nix
-            ({ pkgs, ... }: {
-              venus.debug.enable = true;
-              boot.kernelPackages = inputs.nixpkgs.lib.mkForce (pkgs.linuxKernel.packagesFor (
-                pkgs.pkgsCross.aarch64-multiplatform.callPackage ./nixos/kernel.nix { debug = true; }
-              ));
-            })
+            ({ pkgs, ... }:
+              let debugPkgs = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+              in {
+                venus.debug.enable = true;
+                boot.kernelPackages = inputs.nixpkgs.lib.mkForce (pkgs.linuxKernel.packagesFor (
+                  debugPkgs.callPackage ./nixos/kernel.nix { debug = true; }
+                ));
+              })
           ];
         };
       };

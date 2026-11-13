@@ -11,7 +11,7 @@ let
   crossPkgs = self.allSystems.x86_64-linux._module.args.pkgs.pkgsCross.aarch64-multiplatform;
 in
 {
-  lantian.kernel = lib.mkForce (crossPkgs.callPackage ./kernel.nix { });
+  lantian.kernel = lib.mkForce (crossPkgs.callPackage ./kernel.nix { debug = config.venus.debug.enable; });
 
   networking.usePredictableInterfaceNames = false;
   networking.wireless = {

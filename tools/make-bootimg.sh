@@ -138,7 +138,11 @@ echo "== mkbootimg =="
 gzip -9 -c "$KERNEL_IMAGE" > "$work/Image.gz"
 cat "$work/Image.gz" "$DTB" > "$work/Image.gz-dtb"
 
-cmdline="firmware_class.path=/venus-fw console=tty0 console=ttyGS0,115200 init=/nix/var/nix/profiles/system/init \
+# init= 默认写 profile 路径，但 profile 是可变的（救援系统启动就会把它改回自己），
+# 于是"刷完新内核再重启"会去跑上一套系统、报找不到闭包。INIT_PATH 允许钉死
+# 绝对闭包路径（NixOS 自己生成 boot loader 条目时也是这么写的）。
+init_path=${INIT_PATH:-/nix/var/nix/profiles/system/init}
+cmdline="firmware_class.path=/venus-fw console=tty0 console=ttyGS0,115200 init=$init_path \
 net.ifnames=0 loglevel=7 \
 regulator_ignore_unused pd_ignore_unused clk_ignore_unused $extra"
 

@@ -26,6 +26,12 @@ in
     '';
   };
 
+  options.venus.bluetooth = lib.mkOption {
+    type = lib.types.bool;
+    default = false;
+    description = "是否启用 WCN6851 蓝牙（服务器用途默认关闭，开着会有 rfkill/帧重组报错）。";
+  };
+
   options.venus.firmware = lib.mkOption {
     type = lib.types.nullOr lib.types.path;
     default = ./firmware;
@@ -63,6 +69,20 @@ in
     '';
   };
 
+  # ---------- 板级能力：nftables NAT ----------
+  # 冻结内核没有 NFT_MASQ / NFT_FIB_*（nft_masq 依赖的 nf_nat_masquerade_ipv4 与
+  # nft_fib_ipv6 依赖的 fib6_lookup 都没导出），这两类规则必然加载失败。
+  # venus 是 WiFi 客户端叶子节点，不做网关转发、也没有下游客户端，因此关掉
+  # 出站 masquerade 与 DNS 劫持这两组 NAT 规则即可，其余防火墙规则照常。
+  lantian.firewall.presets.masquerade.enable = lib.mkForce false;
+  lantian.firewall.presets.dns-redirect.enable = lib.mkForce false;
+
+  # ---------- 板级能力：MPTCP ----------
+  # 冻结内核没有 MPTCP（/proc/sys/net/mptcp 不存在）：mptcpd 会每 2 秒重启一次，
+  # iperf3.socket 用 SocketProtocol=mptcp 直接 EIO。
+  services.mptcpd.enable = lib.mkForce false;
+  systemd.sockets.iperf3.socketConfig.SocketProtocol = lib.mkForce "tcp";
+
   # ---------- 板级事实：wlan0 的 MAC 与 /dev/rfkill ----------
   # WCN6851 的 BDF 没有有效 MAC，每次 probe 都随机；AP 对未知 MAC 直接
   # AUTH-REJECT(status 1)，所以这里钉一个固定值（NM 那条路径用 cloned-mac-address）。
@@ -76,7 +96,9 @@ in
       ProtectProc = lib.mkForce "default";
     };
   };
-  # devtmpfs 不建 /dev/rfkill，wpa_supplicant 会打 "rfkill: Cannot open RFKILL control device"
+  # nixpkgs 的 wpa_supplicant 单元无条件把 /dev/rfkill 放进 BindPaths，
+  # 而 venus 内核没有 CONFIG_RFKILL（devtmpfs 不会建这个节点）→ 226/NAMESPACE 无限重启。
+  # 补一个字符设备节点即可：没有驱动时 open 返回 ENODEV，wpa_supplicant 按可选处理。
   systemd.tmpfiles.rules = [ "c /dev/rfkill 0644 root root - 10:242" ];
 
   # ---------- 板级内核能力：zram ----------
@@ -109,8 +131,9 @@ in
   # ---------- 蓝牙（BlueZ；芯片是 WCN6851，AT 固件在 nixos/firmware/qca/）----------
   # BT UART 是 qupv3 SE18 (0x890000)，DTS 里已给它 alias 并挂了 bluetooth 子节点；
   # 电源轨与 WiFi 共用，由 venus-wifi-setup 在运行时打开后再启动 bluetoothd。
+  # 服务器用途不需要 BT；开着只会产生 rfkill/帧重组报错，默认关闭。
   hardware.bluetooth = {
-    enable = true;
+    enable = config.venus.bluetooth;
     powerOnBoot = false;   # 电源轨还没开时不能上电，交给 venus-wifi-setup 之后启动
   };
   # NM 默认开 WiFi 省电(3=enabled)，ath11k 在省电下会掉流量（表现为连上后 ping 不通）
@@ -152,19 +175,28 @@ in
       sleep 1
 
       # 2) 重新训练 PCIe 链路（ath11k 才会枚举到端点）。
-      #    实测偶发 "Device not found"，所以失败时拨一次 wlan_en 再重训，最多 3 轮。
+      #    实测偶发 "Device not found"：成败与上电顺序、链路训练有关，单次成功不了
+      #    就必须反复拨 wlan_en 再重训，直到端点出现（最多 20 轮，带退避）。
       D=/sys/bus/platform/drivers/qcom-pcie
-      for t in 1 2 3; do
+      try_round() {
         echo 1c00000.pcie > "$D/unbind" 2>/dev/null || true
         sleep 2
         echo 1c00000.pcie > "$D/bind" 2>/dev/null || true
         sleep 6
-        [ -d /sys/class/net/wlan0 ] && break
-        echo "第 $t 轮链路没通, 拨 wlan_en 后重试"
+        [ -d /sys/class/net/wlan0 ] && return 0
         echo disabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
         sleep 1
         echo enabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
         sleep 2
+        [ -d /sys/class/net/wlan0 ]
+      }
+      t=1
+      while [ $t -le 20 ]; do
+        try_round && break
+        echo "第 $t 轮链路没通, 拨 wlan_en 后重试"
+        # 退避：前 5 轮 2s，之后逐渐拉长到 30s，避免一直高占用地重复训练
+        if [ $t -lt 5 ]; then sleep 3; elif [ $t -lt 12 ]; then sleep 10; else sleep 30; fi
+        t=$((t+1))
       done
 
       # 3) 等 ath11k 网卡出现（关了可预测命名，名字就是 wlan0）
@@ -199,7 +231,9 @@ in
       fi
       ip -4 -o addr show wlan0 2>/dev/null || echo "警告：wlan0 没有地址"
 
-      # 8) 蓝牙：电源轨（与 WiFi 共用）已开，现在才可以让 BlueZ 上电并下载固件
+      # 8) 蓝牙：电源轨（与 WiFi 共用）已开，现在才可以让 BlueZ 上电并下载固件；
+      #    只有开启 venus.bluetooth 时才做（服务器默认不需要）
+      if [ "''${VENUS_BLUETOOTH:-0}" = 1 ]; then
       /run/current-system/sw/bin/rfkill unblock bluetooth 2>/dev/null || true
       /run/current-system/sw/bin/systemctl start bluetooth.service 2>/dev/null || true
       sleep 3
@@ -214,6 +248,61 @@ in
         sleep 6
       done
       /run/current-system/sw/bin/hciconfig -a 2>/dev/null | head -4 || true
+      fi
+    '';
+  };
+
+  # WiFi 掉线自愈：定时检查 wlan0 是否拿到地址，没拿到就重跑一次上电/重训脚本。
+  # （开机时链路训练偶发失败，靠一次性的 setup 不够）
+  systemd.services.venus-wifi-check = {
+    description = "venus: 检查 wlan0 是否有地址，没有就重新上电重训";
+    serviceConfig = { Type = "oneshot"; };
+    path = with pkgs; [ iproute2 ];
+    script = ''
+      if ip -4 -o addr show wlan0 2>/dev/null | grep -q "inet "; then
+        exit 0
+      fi
+      echo "wlan0 没有地址，重跑 venus-wifi-power"
+      ${config.systemd.package}/bin/systemctl restart venus-wifi-power.service || true
+    '';
+  };
+
+  systemd.timers.venus-wifi-check = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "3min";
+      OnUnitActiveSec = "2min";
+      Unit = "venus-wifi-check.service";
+    };
+  };
+
+  # ---- initrd 取证：把 stage-1 的现场写到持久分区
+  # venus 没有可用的串口、屏幕又拿不到手时，stage-1 失败完全无痕（journald 还在
+  # tmpfs 里）。这里在 switch_root 之前把 initrd 的 unit 状态和 journal 落盘，
+  # 下一次进恢复系统就能直接读 /persistent/venus-initrd.log。
+  boot.initrd.systemd.services.venus-initrd-dump = {
+    description = "venus: 把 initrd 现场写到持久分区";
+    wantedBy = [ "initrd.target" ];
+    after = [ "sysroot.mount" ];
+    before = [ "initrd-switch-root.target" ];
+    unitConfig.DefaultDependencies = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      out=/sysroot/persistent/venus-initrd.log
+      {
+        echo "=== units ==="
+        systemctl --no-pager --full list-units --all 2>&1 | head -80
+        echo
+        echo "=== failed ==="
+        systemctl --no-pager --full --failed 2>&1 | head -40
+        echo
+        echo "=== journal ==="
+        journalctl -b --no-pager 2>&1 | tail -300
+      } > "$out" 2>&1 || true
+      sync || true
     '';
   };
 
@@ -370,6 +459,7 @@ in
     # Type=oneshot 若同步跑完会把 multi-user/graphical 一起拖住（实测 16 秒）。
     # 这里只把设置脚本丢到后台就返回，启动流程不再等它。
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 20; };
+    environment.VENUS_BLUETOOTH = lib.boolToString config.venus.bluetooth;
     script = ''
       ${pkgs.util-linux}/bin/setsid /etc/venus-wifi-setup >/var/log/venus-wifi.log 2>&1 &
       exit 0

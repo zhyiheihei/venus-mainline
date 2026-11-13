@@ -6,10 +6,14 @@ let
     cp -r ${./firmware}/. $out/lib/firmware/
   '';
   venusGadget = ''
+    venus_usb_log() {
+      echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> /persistent/venus-usb-state.log 2>/dev/null || true
+    }
     venus_usb_gadget() {
       force=''${1:-}
       mount -t configfs none /sys/kernel/config 2>/dev/null || true
       G=/sys/kernel/config/usb_gadget/venus
+      venus_usb_log "enter force=$force cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) gadgets=[$(ls /sys/kernel/config/usb_gadget 2>/dev/null | tr '\n' ' ')] udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no)"
 
       if [ "$force" != force ] && [ -s "$G/UDC" ] && [ "$(cat /sys/class/udc/$(cat "$G/UDC")/state 2>/dev/null)" = "configured" ]; then
         echo "gadget 已配置: UDC=$(cat "$G/UDC")"
@@ -47,7 +51,7 @@ let
       sleep 2
       msg="UDC=$UDC state=$(cat /sys/class/udc/$UDC/state 2>/dev/null)"
       echo "$msg"
-      echo "$(date '+%F %T') $msg force=$force" >> /persistent/venus-usb-state.log 2>/dev/null || true
+      venus_usb_log "bind $msg force=$force"
     }
   '';
 
@@ -297,25 +301,16 @@ in
   };
 
   boot.initrd.systemd.services.venus-serial = {
-    description = "venus: initrd 串口 shell";
+    description = "venus: 记录 initrd 阶段的 USB 状态（不建 gadget）";
     path = with pkgs; [ util-linux coreutils bash ];
     wantedBy = [ "initrd.target" ];
     before = [ "initrd.target" ];
     serviceConfig = {
-      Type = "simple";
-      Restart = "always";
-      RestartSec = 3;
+      Type = "oneshot";
+      RemainAfterExit = true;
     };
     script = ''
-      ${venusGadget}
-      venus_usb_gadget || true
-      n=0
-      while [ ! -c /dev/ttyGS0 ] && [ $n -lt 20 ]; do
-        sleep 1
-        n=$((n + 1))
-      done
-      [ -c /dev/ttyGS0 ] || exit 1
-      exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1
+      venus_usb_log "initrd: cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')]"
     '';
   };
 

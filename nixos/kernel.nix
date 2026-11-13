@@ -10,12 +10,6 @@ let
     url = "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${version}.tar.xz";
     hash = "sha256-A5rvhPKwmUrto/T8/D0C7J16m7uQIOomTEP0Rshg9gY=";
   };
-  initramfs = pkgs.runCommand "venus-initramfs" { } ''
-    mkdir -p $out/bin $out/dev $out/proc $out/sys $out/tmp $out/run $out/etc
-    install -m755 ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bin/busybox
-    ln -s busybox $out/bin/sh
-    install -m755 ${../kernel/venus/initramfs/init} $out/init
-  '';
   patchset = pkgs.runCommand "venus-patchset" { } ''
     mkdir -p $out/tools $out/kernel
     cp ${../tools/apply-kernel-patches.sh} $out/tools/apply-kernel-patches.sh
@@ -39,8 +33,6 @@ let
     sed '/^CONFIG_INITRAMFS_SOURCE=/d' ${./kernel-config} > $out
   '' + lib.optionalString debug ''
     cat ${./kernel-config-debug} >> $out
-  '' + ''
-    printf 'CONFIG_INITRAMFS_SOURCE="%s"\n' ${initramfs} >> $out
   '');
 in
 pkgs.linuxKernel.manualConfig {

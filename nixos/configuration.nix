@@ -1,5 +1,5 @@
 
-{ config, lib, modulesPath, options, pkgs, ... }:
+{ config, lib, modulesPath, options, pkgs, venusCross, ... }:
 
 let
   wifiIp = "<LAN_PHONE_IP>";
@@ -9,7 +9,9 @@ in
 {
   imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
 
-  boot.kernelPackages = pkgs.linuxKernel.packagesFor (pkgs.callPackage ./kernel.nix { });
+  venus.debug.enable = true;
+
+  boot.kernelPackages = pkgs.linuxKernel.packagesFor (venusCross.callPackage ./kernel.nix { });
 
   networking.hostName = "venus";
   networking.useDHCP = false;

@@ -50,6 +50,9 @@
         };
         nixosConfigurations.venus = inputs.nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
+          specialArgs = {
+            venusCross = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+          };
           modules = [
             ./nixos/configuration.nix
           ];
@@ -57,6 +60,9 @@
 
         nixosConfigurations.venus-debug = inputs.nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
+          specialArgs = {
+            venusCross = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+          };
           modules = [
             ./nixos/configuration.nix
             ({ pkgs, ... }:

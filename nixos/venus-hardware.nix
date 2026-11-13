@@ -5,6 +5,52 @@ let
     mkdir -p $out/lib/firmware
     cp -r ${./firmware}/. $out/lib/firmware/
   '';
+  venusGadget = ''
+    venus_usb_gadget() {
+      force=''${1:-}
+      mount -t configfs none /sys/kernel/config 2>/dev/null || true
+      G=/sys/kernel/config/usb_gadget/venus
+
+      if [ "$force" != force ] && [ -s "$G/UDC" ] && [ "$(cat /sys/class/udc/$(cat "$G/UDC")/state 2>/dev/null)" = "configured" ]; then
+        echo "gadget 已配置: UDC=$(cat "$G/UDC")"
+        return 0
+      fi
+
+      for u in /sys/kernel/config/usb_gadget/*; do
+        [ -d "$u" ] || continue
+        echo "" > "$u/UDC" 2>/dev/null || true
+        for c in "$u"/configs/*/; do
+          [ -d "$c" ] || continue
+          for l in "$c"*; do [ -L "$l" ] && rm -f "$l"; done
+        done
+      done
+
+      UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+      [ -n "$UDC" ] || { echo "没有 UDC"; return 1; }
+
+      mkdir -p "$G" "$G/functions/acm.GS0"
+      echo 0x18d1 > "$G/idVendor"
+      echo 0x4ee1 > "$G/idProduct"
+      echo 0x0100 > "$G/bcdDevice"
+      echo 0x0200 > "$G/bcdUSB"
+      mkdir -p "$G/strings/0x409"
+      echo venus-m1 > "$G/strings/0x409/serialnumber"
+      echo Xiaomi > "$G/strings/0x409/manufacturer"
+      echo venus > "$G/strings/0x409/product"
+      mkdir -p "$G/configs/c.1/strings/0x409"
+      echo "ACM" > "$G/configs/c.1/strings/0x409/configuration"
+      echo 250 > "$G/configs/c.1/MaxPower"
+      rm -f "$G/configs/c.1/acm.GS0"
+      ln -s "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0"
+
+      echo "$UDC" > "$G/UDC" 2>/dev/null || true
+      sleep 2
+      msg="UDC=$UDC state=$(cat /sys/class/udc/$UDC/state 2>/dev/null)"
+      echo "$msg"
+      echo "$(date '+%F %T') $msg force=$force" >> /persistent/venus-usb-state.log 2>/dev/null || true
+    }
+  '';
+
 in
 {
   options.venus.debug = {
@@ -176,25 +222,10 @@ in
       done
       sleep 1
 
-      D=/sys/bus/platform/drivers/qcom-pcie
-      try_round() {
-        echo 1c00000.pcie > "$D/unbind" 2>/dev/null || true
-        sleep 2
-        echo 1c00000.pcie > "$D/bind" 2>/dev/null || true
-        sleep 6
-        [ -d /sys/class/net/wlan0 ] && return 0
-        echo disabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
+      i=0
+      while [ $i -lt 60 ] && [ ! -d /sys/class/net/wlan0 ]; do
         sleep 1
-        echo enabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
-        sleep 2
-        [ -d /sys/class/net/wlan0 ]
-      }
-      t=1
-      while [ $t -le 20 ]; do
-        try_round && break
-        echo "第 $t 轮链路没通, 拨 wlan_en 后重试"
-        if [ $t -lt 5 ]; then sleep 3; elif [ $t -lt 12 ]; then sleep 10; else sleep 30; fi
-        t=$((t+1))
+        i=$((i + 1))
       done
 
       i=0; while [ $i -lt 60 ] && [ ! -d /sys/class/net/wlan0 ]; do sleep 1; i=$((i+1)); done
@@ -243,19 +274,20 @@ in
   };
 
   systemd.services.venus-wifi-check = {
-    description = "venus: 检查 wlan0 是否有地址，没有就重新上电重训";
+    description = "venus: 检查 wlan0 是否有地址（只记录，不重训）";
     serviceConfig = { Type = "oneshot"; };
     path = with pkgs; [ iproute2 ];
     script = ''
       if ip -4 -o addr show wlan0 2>/dev/null | grep -q "inet "; then
         exit 0
       fi
-      echo "wlan0 没有地址，重跑 venus-wifi-power"
-      ${config.systemd.package}/bin/systemctl restart venus-wifi-power.service || true
+      echo "wlan0 没有地址（不重训，等下一次人工介入）"
+      ip -o link show wlan0 2>&1 | head -2
     '';
   };
 
   systemd.timers.venus-wifi-check = {
+    enable = lib.mkDefault false;
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "3min";
@@ -265,100 +297,63 @@ in
   };
 
   boot.initrd.systemd.services.venus-serial = {
-    description = "venus: initrd 串口看门狗 + 交互 shell";
+    description = "venus: initrd 串口 shell";
+    path = with pkgs; [ util-linux coreutils bash ];
     wantedBy = [ "initrd.target" ];
     before = [ "initrd.target" ];
     serviceConfig = {
       Type = "simple";
       Restart = "always";
-      RestartSec = 2;
+      RestartSec = 3;
     };
     script = ''
-      G=/sys/kernel/config/usb_gadget/venus
-      mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config 2>/dev/null
-      while true; do
-        n=0
-        while [ -z "$(ls /sys/class/udc 2>/dev/null)" ] && [ $n -lt 60 ]; do
-          sleep 1
-          n=$((n + 1))
-        done
-        UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-        if [ -n "$UDC" ]; then
-          if [ ! -d "$G/functions/acm.GS0" ]; then
-            mkdir -p "$G" "$G/strings/0x409" "$G/configs/c.1/strings/0x409" 2>/dev/null
-            echo 0x18d1 > "$G/idVendor"
-            echo 0x4ee1 > "$G/idProduct"
-            echo 0x0100 > "$G/bcdDevice"
-            echo 0x0200 > "$G/bcdUSB"
-            echo venus-m1 > "$G/strings/0x409/serialnumber"
-            echo Xiaomi > "$G/strings/0x409/manufacturer"
-            echo venus > "$G/strings/0x409/product"
-            echo ACM > "$G/configs/c.1/strings/0x409/configuration"
-            echo 250 > "$G/configs/c.1/MaxPower"
-            mkdir -p "$G/functions/acm.GS0" 2>/dev/null
-            ln -sf "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" 2>/dev/null
-          fi
-          echo "" > "$G/UDC" 2>/dev/null
-          sleep 1
-          echo "$UDC" > "$G/UDC" 2>/dev/null
-          n=0
-          while [ ! -c /dev/ttyGS0 ] && [ $n -lt 15 ]; do
-            sleep 1
-            n=$((n + 1))
-          done
-          if [ -c /dev/ttyGS0 ]; then
-            setsid sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' || true
-          fi
-        fi
-        sleep 5
+      ${venusGadget}
+      venus_usb_gadget || true
+      n=0
+      while [ ! -c /dev/ttyGS0 ] && [ $n -lt 20 ]; do
+        sleep 1
+        n=$((n + 1))
       done
+      [ -c /dev/ttyGS0 ] || exit 1
+      exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1
     '';
   };
 
   systemd.services.venus-acm = {
     description = "venus: 重建 USB ACM 串口 (console=ttyGS0)";
+    path = with pkgs; [ util-linux coreutils bash ];
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-udev-settle.service" ];
-    path = with pkgs; [ util-linux coreutils ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
-      mkdir -p /sys/kernel/config
-      mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config || true
-
-      for u in /sys/kernel/config/usb_gadget/*; do
-        [ -e "$u/UDC" ] || continue
-        echo "" > "$u/UDC" 2>/dev/null || true
-      done
-      for u in /sys/kernel/config/usb_gadget/*; do
-        [ -d "$u" ] || continue
-        for c in "$u"/configs/*/; do
-          [ -d "$c" ] || continue
-          for l in "$c"*; do [ -L "$l" ] && rm -f "$l"; done
-          rmdir "$c"/strings/* "$c" 2>/dev/null || true
-        done
-        for f in "$u"/functions/*; do [ -d "$f" ] && rmdir "$f" 2>/dev/null; done
-        rmdir "$u"/strings/* "$u" 2>/dev/null || true
-      done
-
-      UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
-      [ -n "$UDC" ] || { echo "没找到 UDC"; exit 0; }
-      G=/sys/kernel/config/usb_gadget/venus
-      mkdir -p "$G" "$G/strings/0x409" "$G/configs/c.1/strings/0x409"
-      echo 0x18d1 > "$G/idVendor"
-      echo 0x4ee1 > "$G/idProduct"
-      echo 0x0100 > "$G/bcdDevice"
-      echo 0x0200 > "$G/bcdUSB"
-      echo venus-m1 > "$G/strings/0x409/serialnumber"
-      echo Xiaomi > "$G/strings/0x409/manufacturer"
-      echo venus > "$G/strings/0x409/product"
-      echo ACM > "$G/configs/c.1/strings/0x409/configuration"
-      echo 250 > "$G/configs/c.1/MaxPower"
-      mkdir -p "$G/functions/acm.GS0"
-      ln -sfn "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0"
-      echo "$UDC" > "$G/UDC"
-      sleep 2
-      echo "UDC=$UDC state=$(cat /sys/class/udc/$UDC/state 2>/dev/null)"
+      ${venusGadget}
+      venus_usb_gadget force
     '';
+  };
+
+
+  networking.networkmanager.ensureProfiles.profiles = lib.mkIf config.networking.networkmanager.enable {
+    venus-usb = {
+      connection = {
+        id = "venus-usb";
+        uuid = "b8c1f0a2-3d44-4c8e-9f61-72a0d5e19c33";
+        type = "ethernet";
+        interface-name = "usb0";
+        autoconnect = true;
+        autoconnect-priority = 10;
+      };
+      ipv4 = {
+        method = "shared";
+        may-fail = true;
+      };
+      ipv6.method = "ignore";
+    };
+  };
+
+  systemd.network.networks."30-usb0" = lib.mkIf (!config.networking.networkmanager.enable) {
+    matchConfig.Name = "usb0";
+    address = [ "192.168.42.1/24" ];
+    networkConfig.ConfigureWithoutCarrier = true;
   };
 
   systemd.services.venus-net-watch = {
@@ -388,7 +383,8 @@ in
   };
 
   systemd.services.venus-wifi-power = {
-    description = "venus: WiFi 上电、重训 PCIe、连 WiFi（后台执行，不阻塞启动）";
+    description = "venus: WiFi 上电、连 WiFi（后台执行，不阻塞启动）";
+    enable = lib.mkDefault false;
     unitConfig.DefaultDependencies = false;
     wantedBy = [ "sysinit.target" ];
     after = [ "venus-boot-activate.service" ];

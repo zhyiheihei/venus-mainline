@@ -1258,9 +1258,7 @@
  * 注意：默认必须是 peripheral，否则 CC 检测失败时会连 ACM 串口一起丢。
  */
 &usb_1_dwc3 {
-	dr_mode = "otg";
-	usb-role-switch;
-	role-switch-default-mode = "peripheral";
+	dr_mode = "peripheral";
 	maximum-speed = "high-speed";
 	/* Remove USB3 phy */
 	phys = <&usb_1_hsphy>;
@@ -1268,7 +1266,7 @@
 };
 
 &usb_1_dwc3_hs {
-	remote-endpoint = <&pmic_glink_hs_in>;
+	status = "disabled";
 };
 
 

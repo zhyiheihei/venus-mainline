@@ -36,3 +36,17 @@
 - `postmarketos-qcom-sm8350` 的 APKBUILD（内核版本、kconfig 片段、补丁集）尚未取到，
   后续用 GitLab API 在 `main/` 或 `device/` 下按名称检索。
 - 社区 Matrix（`#sm8350-mainlining:matrix.org`）关于 ath11k / WCN6855 的结论未取。
+
+## USB gadget 与 switch-root（查证记录）
+
+- 内核文档 `usb/gadget_configfs.html`：gadget 一旦写入 UDC 即绑定；只要 configfs
+  挂载存在、且函数目录不被删除，绑定就保持。**没有**"switch-root 会自动解绑"的说法。
+- Collabora 的 "Modern USB gadget on Linux & how to integrate it with systemd"（2019, 两部分）
+  讲的是用 configfs + systemd 管理 gadget 的标准做法（gadget 由 unit 建、绑定 UDC）。
+- Luckfox 的 issue #296 记录了一个相关失效：configfs 重新注册 gadget 后，
+  **UDC 不会被自动重新绑定**，需要显式再写一次 UDC；`no_disconnect` 只能延后断开。
+  这与我们观察到的"重绑后主机不再枚举"属于同一类现象。
+- 未找到覆盖"NixOS systemd initrd 里建 gadget、switch-root 后主机掉线"的公开教学；
+  这条只能靠设备侧取证。我们的证据（`/persistent/venus-usb-state.log`）显示
+  switch-root 后 gadget 仍是 `configured`、`ttyGS0` 仍在，但主机侧掉线，
+  所以问题在主机/控制器侧的事件，而非 configfs 被销毁。

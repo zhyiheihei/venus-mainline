@@ -184,6 +184,7 @@ in
 
   boot.blacklistedKernelModules = [
     "snd_soc_cs35l41" "snd_soc_cs35l41_i2c" "snd_soc_cs35l41_lib"
+    "pmic_glink_altmode"
   ];
   systemd.services.venus-rtc-restore = {
     description = "Restore system clock from hardware RTC";
@@ -379,6 +380,23 @@ in
     matchConfig.Name = "usb0";
     address = [ "192.168.42.1/24" ];
     networkConfig.ConfigureWithoutCarrier = true;
+  };
+
+  systemd.services.venus-usb-watch = {
+    description = "venus: 记录 Type-C 角色与 UDC 状态";
+    serviceConfig = { Type = "oneshot"; };
+    script = ''
+      venus_usb_log "watch data_role=$(cat /sys/class/typec/port0/data_role 2>/dev/null) power_role=$(cat /sys/class/typec/port0/power_role 2>/dev/null) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
+    '';
+  };
+
+  systemd.timers.venus-usb-watch = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "20s";
+      OnUnitActiveSec = "20s";
+      Unit = "venus-usb-watch.service";
+    };
   };
 
   systemd.services.venus-net-watch = {

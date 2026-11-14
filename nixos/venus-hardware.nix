@@ -332,9 +332,6 @@ in
       mount -t configfs none /sys/kernel/config 2>/dev/null || true
       venus_usb_create acm
       venus_usb_bind
-      mkdir -p /run/venus-configfs
-      mount --bind /sys/kernel/config /run/venus-configfs 2>/dev/null || true
-      venus_usb_log "bind-mount configfs -> /run/venus-configfs ok=$([ -d /run/venus-configfs/usb_gadget/venus ] && echo yes || echo no)"
       n=0
       while [ ! -c /dev/ttyGS0 ] && [ $n -lt 20 ]; do
         sleep 1
@@ -380,26 +377,6 @@ in
     matchConfig.Name = "usb0";
     address = [ "192.168.42.1/24" ];
     networkConfig.ConfigureWithoutCarrier = true;
-  };
-
-  systemd.services.venus-usb-keepalive = {
-    description = "venus: UDC 掉了就立刻重绑（前 10 分钟，每 2 秒）";
-    path = with pkgs; [ util-linux coreutils bash ];
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = { Type = "simple"; Restart = "always"; RestartSec = 5; };
-    script = ''
-      ${venusGadget}
-      n=0
-      while [ $n -lt 300 ]; do
-        st=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null)
-        if [ "$st" != "configured" ]; then
-          venus_usb_log "keepalive: state=$st rebind"
-          venus_usb_bind
-        fi
-        n=$((n + 1))
-        sleep 2
-      done
-    '';
   };
 
   systemd.services.venus-usb-watch = {

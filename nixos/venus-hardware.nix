@@ -382,19 +382,40 @@ in
     networkConfig.ConfigureWithoutCarrier = true;
   };
 
+  systemd.services.venus-usb-keepalive = {
+    description = "venus: UDC 掉了就立刻重绑（前 10 分钟，每 2 秒）";
+    path = with pkgs; [ util-linux coreutils bash ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = { Type = "simple"; Restart = "always"; RestartSec = 5; };
+    script = ''
+      ${venusGadget}
+      n=0
+      while [ $n -lt 300 ]; do
+        st=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null)
+        if [ "$st" != "configured" ]; then
+          venus_usb_log "keepalive: state=$st rebind"
+          venus_usb_bind
+        fi
+        n=$((n + 1))
+        sleep 2
+      done
+    '';
+  };
+
   systemd.services.venus-usb-watch = {
     description = "venus: 记录 Type-C 角色与 UDC 状态";
     serviceConfig = { Type = "oneshot"; };
     script = ''
-      venus_usb_log "watch data_role=$(cat /sys/class/typec/port0/data_role 2>/dev/null) power_role=$(cat /sys/class/typec/port0/power_role 2>/dev/null) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
+      ${venusGadget}
+      venus_usb_log "watch cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) runbind=$([ -d /run/venus-configfs/usb_gadget/venus ] && echo yes || echo no) data_role=$(cat /sys/class/typec/port0/data_role 2>/dev/null) power_role=$(cat /sys/class/typec/port0/power_role 2>/dev/null) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
     '';
   };
 
   systemd.timers.venus-usb-watch = {
     wantedBy = [ "timers.target" ];
     timerConfig = {
-      OnBootSec = "20s";
-      OnUnitActiveSec = "20s";
+      OnBootSec = "10s";
+      OnUnitActiveSec = "5s";
       Unit = "venus-usb-watch.service";
     };
   };

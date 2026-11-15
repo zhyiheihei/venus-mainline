@@ -14,7 +14,7 @@ let
     mkdir -p $out/lib/firmware
     cp -r ${./firmware}/. $out/lib/firmware/
   '';
-  wifiIp = "<LAN_PHONE_IP>";
+  wifiIp = "192.168.0.150";
   wifiGw = "192.168.0.1";
   wifiMac = "02:11:22:3c:4d:5e";
 in
@@ -51,7 +51,7 @@ in
   networking.wireless = {
     enable = true;
     userControlled.enable = false;
-    networks."<WIFI_SSID>" = { psk = "<WIFI_PASSWORD>"; };
+    networks."moli-1004-backup" = { psk = "__SECRET_VENUS_WIFI_PSK__"; };
   };
   # wlan0 是运行后期才出现的，NixOS 的 network-addresses-wlan0 在开机时找不到设备，
   # 地址由 venus-wifi-power 服务自己加。

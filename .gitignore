@@ -1,3 +1,19 @@
 result*
 .direnv
 repro/
+
+# 内核产物（内核只能由源码 + tools/apply-kernel-patches.sh 重建，禁止进仓库）
+nixos/kernel/
+*.dtb
+*.img
+Image
+Image.gz
+Image.gz-dtb
+modinst/
+
+# 厂商固件（从 modem/vendor 分区提取，不进 git）
+nixos/firmware/
+
+# 本机缓存/日志
+.venus-logs/
+*.log

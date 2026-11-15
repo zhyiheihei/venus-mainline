@@ -1,5 +1,31 @@
 # 交接文档（写给下一个接手的 agent）
 
+> **最新状态 (2026-11-15)：WiFi + 串口 + 桌面全部跑通，基线是 10-25 的 25.05。**
+>
+> 当前设备（新机，12GB）跑的就是本仓库 HEAD（10ed687 之后），冷启动 2/2 验收通过：
+> `wlan0` 自动关联拿 192.168.0.150（WiFi6 2401.9MBit/s/160MHz/HE-MSS11），
+> 同时 `/sys/class/udc/a600000.usb/state=configured`（串口在 Windows 上是 COM3），
+> `systemctl --failed` 为空，`MHI_CB_EE_RDDM` 计数 0。
+>
+> **三条硬前提（缺一条 WiFi 就死，全部有日志实证）**
+> 1. 内核必须有 `userspace-consumer` 补丁：缺它时五路 WiFi regulator probe 报
+>    `error -EBUSY: Failed to get supply 'vout'` / `probe failed with error -16`，
+>    `/sys/bus/platform/devices/regulator-wifi_*/state` 不存在，
+>    `venus-wifi-power` 全部落空，PCIe 永远 `Device not found`。
+> 2. WCN6851(hw1.1) 的 `.num_vdevs` 必须是 **3**，不能照抄 WCN6855 hw2.0 的 4：
+>    4 时固件自复位（`firmware crashed: MHI_CB_EE_RDDM` +
+>    `failed to receive wmi unified ready event: -110`）。见 `tools/apply-kernel-patches.sh` 第 8 段。
+> 3. `dtbo_b` 必须写零（24MB 全零）。只要 dtbo 里有 overlay，ABL 就用 dtbo 的 DTB，
+>    自建 DTB 完全不生效 —— 症状是显示正常但 USB 串口和 WiFi 同时不在。
+>
+> **唯一允许偏离 10-25 的地方**：DTS 的内存布局（12GB 机型）：
+> `memory {}` 占位由 ABL 注入、`removed_mem` 0xa000000、`cont_splash`/`framebuffer` 0xea600000、
+> `dfps_data_mem` @0xec900000、`xbl_aop_mem` 0x80600000+0x260000。
+>
+> 重新构建：`tools/apply-kernel-patches.sh`（幂等）→ 编交叉内核 → `tools/make-bootimg.sh`
+> （脚本式 initrd + 注入 preinit，cmdline 用 `init=/nix/var/nix/profiles/system/init`）。
+
+
 > 最后更新: 2026-10-24 深夜。前任 agent 调试了一整天的状态全部在此。
 > 先读完本文档和 docs/porting-notes.md 再动手。手机状态每次操作前必须与用户确认。
 >

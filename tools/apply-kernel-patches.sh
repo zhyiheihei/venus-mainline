@@ -254,3 +254,25 @@ PYCHK
 chk 'wcn6855 hw1.1' "$ksrc/drivers/net/wireless/ath/ath11k/core.c"
 [ $fail -eq 0 ] || { echo "内核补丁自检失败" >&2; exit 1; }
 echo "内核补丁自检通过"
+
+# 8) ath11k: WCN6851（hw1.1）的 num_vdevs 必须是 3
+#    上游 [PATCH v2 2/7] "wifi: ath11k: enable support for WCN6851" 作者原话：
+#      "This crashes with the firmware that came with the board … I will revert to 3 vdevs for v3"
+#    社区实证（Razer Edge 5G, SM8350, hw1.1）：
+#      "With 4 vdevs the firmware crashes (MHI_CB_EE_RDDM, no WMI ready event).
+#       With 2 + 1, as in v1, Wi-Fi works."
+#    我们此前照抄 WCN6855 hw2.0 的 .num_vdevs = 4，命中同一 bug。
+python3 - "$ksrc/drivers/net/wireless/ath/ath11k/core.c" <<'PYEOF'
+import sys
+p = sys.argv[1]
+lines = open(p).read().split('\n')
+start = next(i for i, l in enumerate(lines) if 'wcn6855 hw1.1' in l)
+for i in range(start, start + 90):
+    if lines[i].strip() == '.num_vdevs = 4,':
+        lines[i] = '\t\t.num_vdevs = 3,'
+        print('ath11k wcn6851: num_vdevs 4 -> 3')
+        break
+else:
+    print('ath11k wcn6851: num_vdevs 已是 3 或结构变化', file=sys.stderr)
+open(p, 'w').write('\n'.join(lines))
+PYEOF

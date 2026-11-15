@@ -7,7 +7,7 @@ let
   '';
   venusGadget = ''
     venus_usb_log() {
-      echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> /persistent/venus-usb-state.log 2>/dev/null || true
+      echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> ''${VLOG:-/persistent/venus-usb-state.log} 2>/dev/null || true
     }
     venus_usb_create() {
       mode=''${1:-acm}
@@ -318,17 +318,19 @@ in
   };
 
   boot.initrd.systemd.services.venus-serial = {
-    description = "venus: initrd 建 ACM gadget 并挂 shell";
+    description = "venus: initrd 建 ACM gadget（shell 分离，不阻塞 switch-root）";
     path = with pkgs; [ util-linux coreutils bash ];
     wantedBy = [ "initrd.target" ];
     before = [ "initrd.target" ];
     serviceConfig = {
-      Type = "simple";
-      Restart = "always";
-      RestartSec = 5;
+      Type = "oneshot";
+      RemainAfterExit = true;
+      TimeoutStopSec = 1;
+      KillSignal = "SIGKILL";
     };
     script = ''
       ${venusGadget}
+      VLOG=/tmp/venus-usb-state.log
       mount -t configfs none /sys/kernel/config 2>/dev/null || true
       venus_usb_create acm
       venus_usb_bind
@@ -337,8 +339,18 @@ in
         sleep 1
         n=$((n + 1))
       done
-      [ -c /dev/ttyGS0 ] || exit 1
-      exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1
+      if [ -c /dev/ttyGS0 ]; then
+        ( setsid sh </dev/ttyGS0 >/dev/ttyGS0 2>&1 & ) || true
+      fi
+      n=0
+      while [ ! -d /sysroot/persistent ] && [ $n -lt 40 ]; do
+        sleep 1
+        n=$((n + 1))
+      done
+      if [ -d /sysroot/persistent ]; then
+        VLOG=/sysroot/persistent/venus-usb-state.log
+        venus_usb_log "initrd: cfgfs=$([ -d /sys/kernel/config/usb_gadget ] && echo yes || echo no) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no)"
+      fi
     '';
   };
 
@@ -350,7 +362,8 @@ in
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       ${venusGadget}
-      venus_usb_log "stage-2 noop cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) gadgets=[$(ls /sys/kernel/config/usb_gadget 2>/dev/null | tr '\n' ' ')] udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
+      ${config.systemd.package}/bin/systemctl reset-failed venus-serial.service 2>/dev/null || true
+      venus_usb_log "stage-2 noop cfgfs=$([ -d /sys/kernel/config/usb_gadget ] && echo yes || echo no) gadgets=[$(ls /sys/kernel/config/usb_gadget 2>/dev/null | tr '\n' ' ')] udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
     '';
   };
 
@@ -379,12 +392,32 @@ in
     networkConfig.ConfigureWithoutCarrier = true;
   };
 
+  systemd.services.venus-usb-keepalive = {
+    description = "venus: UDC 掉了就重绑（连续检查，每 2 秒）";
+    path = with pkgs; [ util-linux coreutils bash ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = { Type = "simple"; Restart = "always"; RestartSec = 5; };
+    script = ''
+      ${venusGadget}
+      sleep 5
+      while true; do
+        st=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null)
+        if [ "$st" != "configured" ]; then
+          venus_usb_log "keepalive: state=$st rebind"
+          venus_usb_bind
+          sleep 3
+        fi
+        sleep 2
+      done
+    '';
+  };
+
   systemd.services.venus-usb-watch = {
     description = "venus: 记录 Type-C 角色与 UDC 状态";
     serviceConfig = { Type = "oneshot"; };
     script = ''
       ${venusGadget}
-      venus_usb_log "watch cfgfs=$(mountpoint -q /sys/kernel/config && echo mounted || echo no) runbind=$([ -d /run/venus-configfs/usb_gadget/venus ] && echo yes || echo no) data_role=$(cat /sys/class/typec/port0/data_role 2>/dev/null) power_role=$(cat /sys/class/typec/port0/power_role 2>/dev/null) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
+      venus_usb_log "watch cfgfs=$([ -d /sys/kernel/config/usb_gadget ] && echo yes || echo no) data_role=$(cat /sys/class/typec/port0/data_role 2>/dev/null) power_role=$(cat /sys/class/typec/port0/power_role 2>/dev/null) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no) usb0=$([ -d /sys/class/net/usb0 ] && echo yes || echo no)"
     '';
   };
 
@@ -392,7 +425,7 @@ in
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "10s";
-      OnUnitActiveSec = "5s";
+      OnUnitActiveSec = "60s";
       Unit = "venus-usb-watch.service";
     };
   };

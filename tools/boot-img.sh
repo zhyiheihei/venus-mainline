@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # 从 NixOS 闭包组装 boot.img（内核 / DTB / initrd / cmdline 全部取自同一闭包）
-# 用法: boot-img.sh <closure> <out.img> [--dtb <dtb 文件>]
+# 用法: boot-img.sh <closure> <out.img> [--dtb <dtb 文件>] [--init <init 路径>]
+# --init: 覆盖 cmdline 里的 init=，用于只换 initrd 而 stage-2 仍用设备上已有闭包的场景
 set -euo pipefail
 closure=${1:?'usage: boot-img.sh <closure> <out.img> [--dtb <dtb>]'}
 out=${2:?'usage: boot-img.sh <closure> <out.img> [--dtb <dtb>]'}
 shift 2
 dtb=""
+init_path=""
 while [ $# -gt 0 ]; do
   case $1 in
     --dtb) dtb=$2; shift 2;;
+    --init) init_path=$2; shift 2;;
     *) echo "unknown arg $1" >&2; exit 1;;
   esac
 done
@@ -20,7 +23,8 @@ done
 dtb=${dtb:-$closure/dtbs/qcom/sm8350-xiaomi-venus.dtb}
 [ -e "$dtb" ] || { echo "DTB 不存在: $dtb" >&2; exit 1; }
 
-cmdline="console=ttyGS0,115200 console=tty0 loglevel=7 consoleblank=0 root=fstab init=$closure/init firmware_class.path=/run/current-system/firmware regulator_ignore_unused pd_ignore_unused clk_ignore_unused net.ifnames=0"
+init_path=${init_path:-$closure/init}
+cmdline="console=ttyGS0,115200 console=tty0 loglevel=7 consoleblank=0 root=fstab init=$init_path firmware_class.path=/run/current-system/firmware regulator_ignore_unused pd_ignore_unused clk_ignore_unused net.ifnames=0"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/venus-bootimg.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -43,3 +47,4 @@ md5=$(md5sum "$out" | cut -c1-32)
 echo "out=$out size=$(stat -c %s "$out") md5=$md5"
 echo "closure=$closure"
 echo "dtb=$dtb md5=$(md5sum "$dtb" | cut -c1-32)"
+echo "init=$init_path"

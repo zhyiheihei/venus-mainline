@@ -80,3 +80,43 @@
 2. H2：把 `linux-build` 的 Image + `modinst` 接进闭包做内核 A/B（需解决 kernelPackages
    接线；先做，不占用设备轮次）。
 3. H3：WiFi 供电时序验证（依赖 1）。
+
+## 2026-11-16 · 26.11 线：WiFi 根因定位（已解）+ 冷启动未通过（待查）
+
+**假设**：26.11 上 wlan0 一直 `unavailable`，怀疑是 WiFi 上电链路没跑起来。
+
+**唯一变量**：WiFi 栈实现（NetworkManager → wpa_supplicant），逐项读日志定位。
+
+**判据（事先写死）**：L1 `PCIe Gen.3 x1 link up`；L2 `ath11k_pci ... wcn6855 hw1.1`；
+L3 `/sys/class/net/wlan0` 出现并能拿到 192.168.0.150。
+
+**结果**
+
+1. L1/L2 一直正常，L3 不满足。NetworkManager 日志给出确切原因：
+   `Couldn't initialize supplicant interface: Failed to D-Bus activate wpa_supplicant service`；
+   改走 `networking.wireless`（wpa_supplicant）后，unit 启动失败于
+   `Failed to set up mount namespacing: /dev/rfkill: No such file or directory`，
+   `Main process exited, code=exited, status=226/NAMESPACE`。
+2. 内核侧证据：`zcat /proc/config.gz | grep RFKILL` → `# CONFIG_RFKILL is not set`，
+   `/dev/rfkill` 不存在；而 nixpkgs 的 `wpa_supplicant.service` 把 `/dev/rfkill`
+   写死在 `BindPaths` 里。
+3. 修复验证：25.05 用户态下 switch 到 26.11 闭包，手动
+   `mknod /dev/rfkill c 10 242` + `systemctl restart wpa_supplicant` →
+   `wlan0 UP 192.168.0.150/24`，`iw dev wlan0 link` 报 2401.9 MBit/s 160MHz
+   HE-MCS11 NSS2，SSH 可用，`systemctl --failed` 空。L3 通过。
+4. 另一个独立缺陷：`/etc/venus-wifi-setup` 第 24 行
+   `nmcli connection up <WIFI_SSID>` 的占位符导致脚本语法错误，上电逻辑后半截不执行。已修。
+
+**未通过的一步（本轮失败，标记为无效实验）**
+
+把 `boot.img` 的 `init=` 从闭包绝对路径改成 `/nix/var/nix/profiles/system/init`、
+profile 指向 26.11 闭包 `4n9rca37…` 后冷启动：设备黑屏，无 ping、无 COM3、
+Windows 侧 fastboot 也看不到设备。**没有串口日志，无法判定死在哪一段**，
+按实验纪律记为无效实验，不据此下任何结论。
+
+**回滚**：`fastboot flash boot_b boot-1025c.img`（md5 `4A80CD35…`）+ reboot，
+已验证 3 次回到 25.05 + WiFi + 串口。
+
+**下一步**：先进 fastboot 刷回 `boot-1025c.img` 取得串口，再在 25.05 下
+用同一内核/initrd 组合逐步验证 26.11 闭包的 stage-2 是否真能起、
+`boot.initrd.systemd.services.venus-serial` 是否生成了 gadget。

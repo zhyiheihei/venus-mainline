@@ -5,6 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     systems.url = "github:nix-systems/default";
+    umbriel = {
+      url = "github:noctalia-dev/umbriel/main";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -52,6 +56,7 @@
           system = "aarch64-linux";
           specialArgs = {
             venusCross = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+            inherit inputs;
           };
           modules = [
             ./nixos/configuration.nix
@@ -62,6 +67,7 @@
           system = "aarch64-linux";
           specialArgs = {
             venusCross = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+            inherit inputs;
           };
           modules = [
             ./nixos/configuration.nix

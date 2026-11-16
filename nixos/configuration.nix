@@ -1,13 +1,13 @@
 
-{ config, lib, modulesPath, options, pkgs, venusCross, ... }:
+{ config, lib, modulesPath, options, pkgs, venusCross, inputs, ... }:
 
 let
-  wifiIp = "<LAN_PHONE_IP>";
+  wifiIp = "192.168.0.150";
   wifiGw = "192.168.0.1";
   wifiMac = "02:11:22:3c:4d:5e";
 in
 {
-  imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
+  imports = [ ./hardware-configuration.nix ./venus-hardware.nix inputs.umbriel.nixosModules.default ];
 
   venus.debug.enable = true;
 
@@ -15,49 +15,39 @@ in
 
   networking.hostName = "venus";
   networking.useDHCP = false;
-  networking.useNetworkd = false;
-  networking.usePredictableInterfaceNames = false;
+    networking.usePredictableInterfaceNames = false;
   services.resolved.enable = true;
   networking.nameservers = [ wifiGw "223.5.5.5" ];
 
-  networking.networkmanager = {
+  # WiFi 走 wpa_supplicant（与 25.05 已验证的那条线一致）。
+  # 26.11 的 NetworkManager 路径在 venus 上起不来：NM 报
+  #   "Couldn't initialize supplicant interface: Failed to D-Bus activate wpa_supplicant service"
+  # 导致 wlan0 一直 unavailable；而 networking.wireless 直接给 wpa_supplicant + 固定 IP，实测可用。
+  networking.networkmanager.enable = false;
+  networking.wireless = {
     enable = true;
-    settings.main.no-auto-default = "*";
-    ensureProfiles.profiles.venus-wifi = {
-      connection = {
-        id = "<WIFI_SSID>";
-        uuid = "7c2f1a84-5b3e-4a91-9d24-1f6c0e8ab3d5";
-        type = "wifi";
-        interface-name = "wlan0";
-        autoconnect = true;
-        autoconnect-retries = 0;
-      };
-      wifi = {
-        ssid = "<WIFI_SSID>";
-        mode = "infrastructure";
-        cloned-mac-address = wifiMac;
-      };
-      wifi-security = {
-        key-mgmt = "wpa-psk";
-        psk = "<WIFI_PASSWORD>";
-      };
-      ipv4 = {
-        method = "manual";
-        address1 = "${wifiIp}/24,${wifiGw}";
-        dns = "223.5.5.5;${wifiGw};";
-        may-fail = false;
-      };
-      ipv6.method = "ignore";
-    };
+    userControlled.enable = false;
+    networks."moli-1004-backup" = { psk = "__SECRET_VENUS_WIFI_PSK__"; };
   };
-  networking.networkmanager.unmanaged = [ "interface-name:lo" ];
+  networking.useNetworkd = true;
+  systemd.network.networks."20-wlan0" = {
+    matchConfig.Name = "wlan0";
+    networkConfig = {
+      DHCP = "no";
+      DNS = [ wifiGw "223.5.5.5" ];
+    };
+    address = [ "${wifiIp}/24" ];
+    routes = [ { Destination = "0.0.0.0/0"; Gateway = wifiGw; } ];
+  };
+  systemd.services."network-addresses-wlan0".enable = false;
+  systemd.services."network-setup".enable = false;
 
   networking.firewall.enable = false;
 
   systemd.services.nix-daemon.environment = {
-    http_proxy = "socks5h://<LAN_PROXY_IP>:1080";
-    https_proxy = "socks5h://<LAN_PROXY_IP>:1080";
-    all_proxy = "socks5h://<LAN_PROXY_IP>:1080";
+    http_proxy = "socks5h://192.168.0.1:1080";
+    https_proxy = "socks5h://192.168.0.1:1080";
+    all_proxy = "socks5h://192.168.0.1:1080";
   };
   services.openssh = {
     enable = true;
@@ -76,18 +66,33 @@ in
   };
   services.getty.autologinUser = "venus";
 
-  services.desktopManager.plasma6.enable = true;
-  services.displayManager.defaultSession = "plasma";
+  # 桌面：与本机（x86 工作站）同款的 umbriel 合成器 + greetd 自动登录
+  programs.umbriel.enable = true;
+  services.displayManager.defaultSession = "umbriel";
   security.polkit.enable = true;
+  programs.dconf.enable = true;
+  services.gnome.gnome-keyring.enable = true;
+  services.upower = {
+    enable = true;
+    criticalPowerAction = "PowerOff";
+  };
+  services.greetd = {
+    enable = true;
+    restart = true;
+    settings = {
+      default_session = {
+        command = "${lib.getExe' pkgs.greetd "agreety"} --cmd start-umbriel";
+        user = "greeter";
+      };
+      initial_session = {
+        command = "start-umbriel";
+        user = "venus";
+      };
+    };
+  };
+  systemd.services.greetd.serviceConfig.RestartSec = "5s";
+  environment.etc."greetd/environments".text = "start-umbriel\n";
 
-  services.displayManager.sddm = {
-    enable = true;
-    wayland.enable = true;
-  };
-  services.displayManager.autoLogin = {
-    enable = true;
-    user = "venus";
-  };
 
   users.users.venus = {
     isNormalUser = true;
@@ -128,6 +133,7 @@ in
   time.timeZone = "Asia/Shanghai";
   i18n.defaultLocale = "en_US.UTF-8";
   environment.systemPackages = with pkgs; [
+    nautilus seahorse
     vim git htop tmux rsync curl wget iw wpa_supplicant usbutils pciutils busybox e2fsprogs zstd
     imagemagick
   ];

@@ -152,6 +152,15 @@ in
 
   systemd.network.networks."10-wlan0".linkConfig.MACAddress =
     lib.mkDefault "02:11:22:3c:4d:5e";
+  # 内核没有 CONFIG_RFKILL（device.config 里 "# CONFIG_RFKILL is not set"），
+  # /dev/rfkill 不存在；而 nixpkgs 的 wpa_supplicant.service 把 /dev/rfkill 写死在
+  # BindPaths 里，缺这个节点时启动直接 226/NAMESPACE：
+  #   "Failed to set up mount namespacing: /dev/rfkill: No such file or directory"
+  #   "Main process exited, code=exited, status=226/NAMESPACE"
+  # 这里补一个字符设备节点只为满足 bind mount（没有 rfkill 驱动，打开会 ENODEV，
+  # wpa_supplicant 把它当“无 rfkill”处理，不影响连接）。
+  systemd.tmpfiles.rules = [ "c /dev/rfkill 0600 root root 10 242 - -" ];
+
   systemd.services."wpa_supplicant-wlan0" = lib.mkIf config.networking.wireless.enable {
     serviceConfig = {
       ProcSubset = lib.mkForce "all";
@@ -259,7 +268,7 @@ in
         "# 5) 交给 NetworkManager：固定 MAC 之后让 NM 接管 wlan0 并连上保存的连接"
         "${pkgs.networkmanager}/bin/nmcli device set wlan0 managed yes 2>/dev/null || true"
         "${pkgs.networkmanager}/bin/nmcli connection up venus-wifi 2>/dev/null || \\"
-        "  ${pkgs.networkmanager}/bin/nmcli connection up <WIFI_SSID> 2>/dev/null || true"
+        "  ${pkgs.networkmanager}/bin/nmcli connection up moli-1004-backup 2>/dev/null || true"
       ])}${lib.optionalString (!config.networking.networkmanager.enable) ''
         ${pkgs.iproute2}/bin/ip link set wlan0 up
       ''}
@@ -458,7 +467,7 @@ in
 
   systemd.services.venus-wifi-power = {
     description = "venus: WiFi 上电、连 WiFi（后台执行，不阻塞启动）";
-    enable = lib.mkDefault false;
+    enable = true;
     unitConfig.DefaultDependencies = false;
     wantedBy = [ "sysinit.target" ];
     after = [ "venus-boot-activate.service" ];

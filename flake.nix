@@ -5,10 +5,6 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     systems.url = "github:nix-systems/default";
-    umbriel = {
-      url = "github:noctalia-dev/umbriel/main";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =

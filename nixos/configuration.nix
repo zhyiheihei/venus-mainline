@@ -1,5 +1,5 @@
 
-{ config, lib, modulesPath, options, pkgs, venusCross, inputs, ... }:
+{ config, lib, modulesPath, options, pkgs, venusCross, ... }:
 
 let
   wifiIp = "192.168.0.150";
@@ -7,7 +7,7 @@ let
   wifiMac = "02:11:22:3c:4d:5e";
 in
 {
-  imports = [ ./hardware-configuration.nix ./venus-hardware.nix inputs.umbriel.nixosModules.default ];
+  imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
 
   venus.debug.enable = true;
 
@@ -66,33 +66,10 @@ in
   };
   services.getty.autologinUser = "venus";
 
-  # 桌面：与本机（x86 工作站）同款的 umbriel 合成器 + greetd 自动登录
-  programs.umbriel.enable = true;
-  services.displayManager.defaultSession = "umbriel";
+  # 无桌面：这台机在 fleet 里是 server 角色（见 hosts/venus）。桌面栈此前是
+  # 冷启动失败的可疑因素之一，按用户要求整个去掉，只保留串口 + SSH。
   security.polkit.enable = true;
   programs.dconf.enable = true;
-  services.gnome.gnome-keyring.enable = true;
-  services.upower = {
-    enable = true;
-    criticalPowerAction = "PowerOff";
-  };
-  services.greetd = {
-    enable = true;
-    restart = true;
-    settings = {
-      default_session = {
-        command = "${lib.getExe' pkgs.greetd "agreety"} --cmd start-umbriel";
-        user = "greeter";
-      };
-      initial_session = {
-        command = "start-umbriel";
-        user = "venus";
-      };
-    };
-  };
-  systemd.services.greetd.serviceConfig.RestartSec = "5s";
-  environment.etc."greetd/environments".text = "start-umbriel\n";
-
 
   users.users.venus = {
     isNormalUser = true;

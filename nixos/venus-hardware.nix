@@ -150,8 +150,13 @@ in
     };
   };
 
-  systemd.network.networks."10-wlan0".linkConfig.MACAddress =
-    lib.mkDefault "02:11:22:3c:4d:5e";
+  # 固定 wlan0 的 MAC。必须带 [Match]，否则 26.11 的 systemd-networkd 直接判定该文件无效：
+  #   "10-wlan0.network: No valid settings found in the [Match] section, ignoring file"
+  # （25.05 的 257.0 会容忍，26.11 的 257.10 不容忍）
+  systemd.network.networks."10-wlan0" = {
+    matchConfig.Name = "wlan0";
+    linkConfig.MACAddress = lib.mkDefault "02:11:22:3c:4d:5e";
+  };
   # 内核没有 CONFIG_RFKILL（device.config 里 "# CONFIG_RFKILL is not set"），
   # /dev/rfkill 不存在；而 nixpkgs 的 wpa_supplicant.service 把 /dev/rfkill 写死在
   # BindPaths 里，缺这个节点时启动直接 226/NAMESPACE：
@@ -356,6 +361,20 @@ in
         sleep 1
         n=$((n + 1))
       done
+      # 关键取证：无论后面 stage-2 是否起得来，都把 initrd 阶段的证据落到 /persistent，
+      # 这样即使整机黑屏（无串口、无 WiFi），下次启动别的镜像也能读到这次失败现场。
+      if [ -d /sysroot/persistent ]; then
+        {
+          echo "=== $(date '+%F %T') initrd dmesg ==="
+          dmesg 2>/dev/null | tail -200
+          echo "=== udc ==="
+          cat /sys/class/udc/*/state 2>/dev/null
+          echo "=== configfs ==="
+          ls /sys/kernel/config/usb_gadget 2>/dev/null
+          echo "=== rfkill ==="
+          ls -l /dev/rfkill 2>/dev/null
+        } > /sysroot/persistent/venus-initrd-boot.log 2>&1
+      fi
       if [ -d /sysroot/persistent ]; then
         VLOG=/sysroot/persistent/venus-usb-state.log
         venus_usb_log "initrd: cfgfs=$([ -d /sys/kernel/config/usb_gadget ] && echo yes || echo no) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no)"
@@ -401,6 +420,54 @@ in
     networkConfig.ConfigureWithoutCarrier = true;
   };
 
+  # 死手：冷启动后两条通道都没起来就自己重启，避免"黑屏 + 无 USB"需要人工进 fastboot。
+  # 依据：2026-11-16/17 多次 26.11 冷启动后 WiFi 与 COM 同时消失、现场零日志（无任何
+  # 可观察通道），只能靠人按电源+音量键。这里把"没有通道"变成一次自动重试。
+  # 计数放在 /persistent，重启 3 次仍不行就放弃自动重启，留给人工（并让 ABL 的
+  # 失败计数把槽位判为不可引导，回落到 boot_a 的 Android，仍有 adb/fastboot）。
+  # stage-2 取证同样落盘（60 秒后写一次），配合 initrd 的那份可以拼出完整启动链
+  systemd.services.venus-bootdump = {
+    description = "venus: 把 stage-2 的关键状态写到 /persistent";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 120; };
+    script = ''
+      sleep 60
+      {
+        echo "=== $(date '+%F %T') stage-2 dump ==="
+        echo "booted=$(readlink -f /run/booted-system)"
+        ${pkgs.iproute2}/bin/ip -br addr
+        cat /sys/class/udc/*/state 2>/dev/null
+        ls /sys/kernel/config/usb_gadget 2>/dev/null
+        ${pkgs.systemd}/bin/systemctl --failed --no-pager | head -20
+        ${pkgs.systemd}/bin/systemctl status wpa_supplicant systemd-networkd venus-wifi-power venus-usb-keepalive --no-pager 2>&1 | head -40
+        ${pkgs.util-linux}/bin/dmesg 2>/dev/null | tail -100
+      } > /persistent/venus-stage2-boot.log 2>&1
+    '';
+  };
+
+  systemd.services.venus-deadman = {
+    description = "venus: 90 秒内 WiFi 与串口都没起来就自动重启（最多 3 次）";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 200; };
+    script = ''
+      set -u
+      S=/persistent/venus-deadman.count
+      n=$(cat "$S" 2>/dev/null || echo 0)
+      [ "$n" -ge 3 ] && { echo "deadman: 已重试 $n 次，放弃自动重启"; exit 0; }
+      sleep 90
+      ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show wlan0 2>/dev/null | grep -c 'inet ')
+      udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || true)
+      echo "deadman: ip4=$ip4 udc=$udc"
+      if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then
+        echo $((n + 1)) > "$S"
+        sync
+        ${pkgs.systemd}/bin/systemctl reboot
+      else
+        rm -f "$S"
+      fi
+    '';
+  };
+
   systemd.services.venus-usb-keepalive = {
     description = "venus: UDC 掉了就重绑（连续检查，每 2 秒）";
     path = with pkgs; [ util-linux coreutils bash ];
@@ -409,9 +476,20 @@ in
     script = ''
       ${venusGadget}
       sleep 5
+      mount -t configfs none /sys/kernel/config 2>/dev/null || true
       while true; do
+        # gadget 可能不存在（switch_root 后由 stage-2 接管的情形），先补齐再谈绑定
+        if [ ! -d /sys/kernel/config/usb_gadget/venus ]; then
+          venus_usb_create acm
+          venus_usb_log "keepalive: gadget 缺失，已重建"
+        fi
         st=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null)
-        if [ "$st" != "configured" ]; then
+        # 只在“根本没有绑定”时才重绑。state=default 表示已绑定、主机正在枚举，
+        # 这时再往 UDC 写设备名会让主机重新枚举，永远走不到 configured：
+        # 实测日志（/persistent/venus-usb-state.log，2026-11-17 02:57）表现为
+        #   keepalive: state=default rebind / bind UDC=a600000.usb state=default
+        # 每 6 秒一次的死循环，主机侧没有 COM、也没有 18D1。
+        if [ -z "$st" ] || [ "$st" = "not attached" ]; then
           venus_usb_log "keepalive: state=$st rebind"
           venus_usb_bind
           sleep 3

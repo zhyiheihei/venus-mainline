@@ -253,19 +253,30 @@ in
       P=/sys/bus/platform/devices
       D=/sys/bus/platform/drivers/qcom-pcie
 
+      # 取证：先把自己的身份和重训通道的有无写清楚，否则无法区分"脚本没跑/跑了但没权限"
+      echo "--- $(date '+%F %T') booted=$(readlink -f /run/booted-system)"
+      echo "--- driver bind/unbind: $(ls $D/bind $D/unbind 2>&1 | tr '\n' ' ')"
+      echo "--- UDC state: $(cat /sys/class/udc/a600000.usb/state 2>/dev/null)"
+
+      # 照 25.05 已验证的顺序：先写 voltage，再 enabled（只写 state 在 25.05 上不够）
+      setv() { [ -w "$P/regulator-wifi_$1/voltage" ] && echo "$2" > "$P/regulator-wifi_$1/voltage" 2>/dev/null || true; }
+      setv io 1800000; setv dig 752000; setv rfa1 1904000; setv rfa2 1352000; setv aon 500000
       for r in io dig rfa1 rfa2 aon; do
         echo enabled > "$P/regulator-wifi_$r/state" 2>/dev/null || true
       done
-      # wlan_en(gpio64)/bt_en(gpio65) 是芯片真正的电源使能；exp1 已实证缺 wlan_en 时
-      # 芯片根本不上电、PCIe 连端点都没有
+      # wlan_en(gpio64) 是芯片真正的电源使能；exp1 已实证缺 wlan_en 时芯片根本不上电
       echo enabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
       sleep 1
 
-      i=0
-      while [ $i -lt 60 ] && [ ! -d /sys/class/net/wlan0 ]; do
-        sleep 1
-        i=$((i + 1))
-      done
+      # 关键：25.05 是在等网卡之前「无条件」做一次 PCIe unbind/bind 才 link up 的。
+      # 26.11 上这段被放在了「等 120 秒之后」，于是整场都等不到 wlan0。
+      echo "PCIe 重训（无条件，先做）"
+      echo 1c00000.pcie > "$D/unbind" 2>/dev/null && echo "unbind ok" || echo "unbind FAILED"
+      sleep 2
+      echo 1c00000.pcie > "$D/bind" 2>/dev/null && echo "bind ok" || echo "bind FAILED"
+      sleep 3
+      echo "--- dmesg(pcie) after retrain:"
+      dmesg 2>/dev/null | grep -i 'pcie' | tail -6
 
       i=0; while [ $i -lt 60 ] && [ ! -d /sys/class/net/wlan0 ]; do sleep 1; i=$((i+1)); done
       [ -d /sys/class/net/wlan0 ] || { echo "ath11k 网卡没出现"; exit 0; }
@@ -442,6 +453,25 @@ in
   # 计数放在 /persistent，重启 3 次仍不行就放弃自动重启，留给人工（并让 ABL 的
   # 失败计数把槽位判为不可引导，回落到 boot_a 的 Android，仍有 adb/fastboot）。
   # stage-2 取证同样落盘（60 秒后写一次），配合 initrd 的那份可以拼出完整启动链
+  # 取证：若盘上放了 /persistent/probe.sh，就在启动 20 秒后自动执行它并落盘结果。
+  # 这样不需要靠串口在十几秒窗口里手打命令（此前一直是手动发，多次错过）。
+  systemd.services.venus-probe = {
+    description = "venus: 若存在 /persistent/probe.sh 则自动执行取证";
+    serviceConfig = { Type = "oneshot"; TimeoutStartSec = 180; };
+    script = ''
+      sleep 20
+      if [ -x /persistent/probe.sh ]; then
+        /persistent/probe.sh || true
+        cp -f /persistent/venus-probe.out /persistent/venus-probe-last.out 2>/dev/null || true
+      fi
+    '';
+  };
+
+  systemd.timers.venus-probe = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = { OnBootSec = "50s"; Unit = "venus-probe.service"; };
+  };
+
   systemd.services.venus-bootdump = {
     description = "venus: 把 stage-2 的关键状态写到 /persistent";
     wantedBy = [ "multi-user.target" ];
@@ -465,16 +495,17 @@ in
     '';
   };
 
+  # 注意：不能 wantedBy = multi-user.target —— 带 sleep 的 oneshot 会把整个
+  # multi-user.target 拖住（2026-11-17 16:09 实测：Startup finished 1min 44s，
+  # WiFi/串口/keepalive 全部顺延，等于自杀）。改成 timer 触发。
   systemd.services.venus-deadman = {
-    description = "venus: 90 秒内 WiFi 与串口都没起来就自动重启（最多 3 次）";
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 200; };
+    description = "venus: 启动 3 分钟后若 WiFi 与串口都没起来就自动回滚并重启（最多 3 次）";
+    serviceConfig = { Type = "oneshot"; TimeoutStartSec = 200; };
     script = ''
       set -u
       S=/persistent/venus-deadman.count
       n=$(cat "$S" 2>/dev/null || echo 0)
       [ "$n" -ge 3 ] && { echo "deadman: 已重试 $n 次，放弃自动重启"; exit 0; }
-      sleep 90
       ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show wlan0 2>/dev/null | grep -c 'inet ')
       udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || true)
       echo "deadman: ip4=$ip4 udc=$udc"
@@ -493,6 +524,11 @@ in
         rm -f "$S"
       fi
     '';
+  };
+
+  systemd.timers.venus-deadman = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = { OnBootSec = "3min"; Unit = "venus-deadman.service"; };
   };
 
   systemd.services.venus-usb-keepalive = {
@@ -570,13 +606,20 @@ in
     '';
   };
 
+  systemd.timers.venus-wifi-retry = {
+    description = "venus: 每 60 秒重试 WiFi 上电 + PCIe 重训，直到 wlan0 出现";
+    wantedBy = [ "timers.target" ];
+    timerConfig = { OnBootSec = "40s"; OnUnitActiveSec = "60s"; Unit = "venus-wifi-power.service"; };
+  };
+
   systemd.services.venus-wifi-power = {
     description = "venus: WiFi 上电、连 WiFi（后台执行，不阻塞启动）";
     enable = true;
-    unitConfig.DefaultDependencies = false;
-    wantedBy = [ "sysinit.target" ];
-    after = [ "venus-boot-activate.service" ];
-    before = [ "sysinit.target" ];
+    # 25.05 是挂在 multi-user.target、在 udev 稳定之后才通的。这里不再设 Before=
+    # （否则 oneshot 会把 target 拖住），改由 venus-wifi-retry.timer 每 60 秒重试，
+    # 直到 wlan0 出现才停（脚本内部自己判断，出现即秒退）。
+    wantedBy = [ "multi-user.target" ];
+    after = [ "local-fs.target" "systemd-udevd.service" ];
     # 必须前台同步跑完：脚本里要做“开五路 regulator → pcie bind 重训 → 等 wlan0”。
     # 之前用 `setsid ... & exit 0` 丢到后台，systemd 立刻认为上电完成，
     # 而 PCIe 在那一刻电源还没就位 → qcom-pcie probe 失败 → deferred probe 没人再触发。

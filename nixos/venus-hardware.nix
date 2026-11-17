@@ -480,6 +480,13 @@ in
       echo "deadman: ip4=$ip4 udc=$udc"
       if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then
         echo $((n + 1)) > "$S"
+        # 自愈：把 /persistent 里备份的可用 boot.img 写回 boot_b 再重启，
+        # 否则这台机一旦刷了坏的引导镜像就只能靠人按住电源+音量键进 fastboot。
+        # 备份由部署脚本放在 /persistent/boot-backup-2505.img。
+        if [ -f /persistent/boot-backup-2505.img ]; then
+          echo "deadman: 回写 boot_b ← /persistent/boot-backup-2505.img"
+          dd if=/persistent/boot-backup-2505.img of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync 2>/dev/null
+        fi
         sync
         ${pkgs.systemd}/bin/systemctl reboot
       else

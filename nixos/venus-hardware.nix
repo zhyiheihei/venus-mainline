@@ -452,8 +452,12 @@ in
         ls /sys/kernel/config/usb_gadget 2>/dev/null
         ${pkgs.systemd}/bin/systemctl --failed --no-pager | head -20
         ${pkgs.systemd}/bin/systemctl status wpa_supplicant systemd-networkd venus-wifi-power venus-usb-keepalive --no-pager 2>&1 | head -40
-        ${pkgs.util-linux}/bin/dmesg 2>/dev/null | tail -100
+        echo "=== devices_deferred（-EPROBE_DEFER 的原因就写在这里，正常日志里一个字都不打）==="
+        cat /sys/kernel/debug/devices_deferred 2>&1 | head -40
+        echo "=== pcie/phy/regulator 相关 dmesg ==="
+        ${pkgs.util-linux}/bin/dmesg 2>/dev/null | grep -iE 'pcie|qmp|phy|regulator-wifi|userspace-consumer|smmu' | head -60
       } > /persistent/venus-stage2-boot.log 2>&1
+      ${pkgs.util-linux}/bin/dmesg 2>/dev/null > /persistent/venus-dmesg.log || true
     '';
   };
 

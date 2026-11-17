@@ -120,3 +120,18 @@ Windows 侧 fastboot 也看不到设备。**没有串口日志，无法判定死
 **下一步**：先进 fastboot 刷回 `boot-1025c.img` 取得串口，再在 25.05 下
 用同一内核/initrd 组合逐步验证 26.11 闭包的 stage-2 是否真能起、
 `boot.initrd.systemd.services.venus-serial` 是否生成了 gadget。
+
+## 2026-11-17 26.11 冷启动系列（全部失败，附原因归类）
+
+| # | 六件套 / 做法 | 结果 | 结论 |
+|---|---|---|---|
+| 1 | 26.11 闭包 + fastboot boot.img（`init=` 指设备上不存在的闭包） | 全暗，无 COM | **无效实验**：stage-1 找不到闭包会自己扫盘挑一个，实际跑的是旧闭包 `fsr1cmy9` |
+| 2 | 同上 ×2（boot-wifi / boot-defer） | 全暗 | 同上，仍然跑旧闭包；我的三次"修复"从未执行 |
+| 3 | 26.11 旧闭包 `fsr1cmy9` 正常冷启动 | 有 COM、stage-2 起来、`wpa_supplicant active`、`0 failed units`，但 `ip addr` 只有 `lo` | 有效实验：`journalctl -b \| grep -c pcie` = **0**，`qcom-pcie` 整场未 probe → 无 wlan0 |
+| 4 | 新闭包 `2zhn169g` 用 **kexec** 从 25.05 跳入 | 全暗，无 COM | 无效实验：kexec 路径下连 initrd 的 gadget 都没建起来，无法判断闭包好坏 |
+| 5 | rescue6（initrd 内 root shell） | 稳定，能在 COM6 上跑命令、只读挂载 rootfs | **有效取证手段**，落盘日志链路可用 |
+
+关键教训：
+- 刷 boot.img 之前必须确认 `init=` 指的闭包 `nix-store --check-validity` 通过、确实在设备上；否则 stage-1 会静默回落到别的闭包。
+- 用 kexec 做 A/B 在这台机上不可靠（本次无 COM、无任何日志），boot.img 才是唯一可靠入口。
+- 26.11 的真实卡点是 PCIe 不 probe；判定证据是 `journalctl -b | grep -c pcie` 与 `cat /sys/kernel/debug/devices_deferred`。

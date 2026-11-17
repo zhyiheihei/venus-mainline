@@ -251,10 +251,14 @@ in
     text = ''
       set -u
       P=/sys/bus/platform/devices
+      D=/sys/bus/platform/drivers/qcom-pcie
 
       for r in io dig rfa1 rfa2 aon; do
         echo enabled > "$P/regulator-wifi_$r/state" 2>/dev/null || true
       done
+      # wlan_en(gpio64)/bt_en(gpio65) 是芯片真正的电源使能；exp1 已实证缺 wlan_en 时
+      # 芯片根本不上电、PCIe 连端点都没有
+      echo enabled > "$P/regulator-wlan-en-ctl/state" 2>/dev/null || true
       sleep 1
 
       i=0

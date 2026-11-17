@@ -135,3 +135,22 @@ Windows 侧 fastboot 也看不到设备。**没有串口日志，无法判定死
 - 刷 boot.img 之前必须确认 `init=` 指的闭包 `nix-store --check-validity` 通过、确实在设备上；否则 stage-1 会静默回落到别的闭包。
 - 用 kexec 做 A/B 在这台机上不可靠（本次无 COM、无任何日志），boot.img 才是唯一可靠入口。
 - 26.11 的真实卡点是 PCIe 不 probe；判定证据是 `journalctl -b | grep -c pcie` 与 `cat /sys/kernel/debug/devices_deferred`。
+
+## 2026-11-17 14:53 26.11 新闭包 si5mkkj9 冷启动（boot_b dd，全程自服务）
+
+六件套：kernel+initrd+dtb 全部来自 si5mkkj9；cmdline `init=/nix/store/si5mkkj9…/init`，
+`loglevel=8`。boot_b 由 25.05 侧 dd 写入并回读 md5 一致（f821865d…），未用 fastboot。
+
+结果：重启后 3 分钟内 ping 全无、**COM 全无**（initrd 的 ACM gadget 都没出现）。
+
+与之前 fsr1cmy9 那几次（有 COM、stage-2 起、只是没 wlan0）相比，这次连 initrd 都没到，
+说明差异在**新构建的内核本身**（本次 config 加了 PSI/BPF_LSM/AUTOFS4/EROFS/VXLAN/
+CHECKPOINT_RESTORE/APPARMOR/HARDENED_USERCOPY/FORTIFY_SOURCE），而不是用户态脚本。
+
+下一步必须先做「变量隔离」：
+1. 新内核 + 25.05 initrd + init=25.05 → 若能起 WiFi，说明新内核可用，问题在 26.11 initrd；
+2. 旧内核（手编）+ 26.11 initrd + init=26.11 → 若能起 COM，说明问题在内核 config 新增项。
+
+本次同时修复了一个真 bug：`/etc/venus-wifi-setup` 里 `$D` 从未定义（脚本 `set -u`），
+导致 PCIe unbind/bind 兜底重训**从未执行过**；已补 `D=/sys/bus/platform/drivers/qcom-pcie`，
+并新增 `regulator-wlan-en-ctl` 使能（exp1 已证明缺 wlan_en 时芯片完全不上电）。

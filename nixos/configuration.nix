@@ -27,7 +27,7 @@ in
   networking.wireless = {
     enable = true;
     userControlled.enable = false;
-    networks."moli-1004-backup" = { psk = "__SECRET_VENUS_WIFI_PSK__"; };
+    networks."moli-1004-backup" = { psk = "88888888"; };
   };
   networking.useNetworkd = true;
   systemd.network.networks."20-wlan0" = {

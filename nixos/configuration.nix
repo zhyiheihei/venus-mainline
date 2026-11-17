@@ -27,7 +27,7 @@ in
   networking.wireless = {
     enable = true;
     userControlled.enable = false;
-    networks."moli-1004-backup" = { psk = "88888888"; };
+    networks."moli-1004-backup" = { psk = "__SECRET_VENUS_WIFI_PSK__"; };
   };
   networking.useNetworkd = true;
   systemd.network.networks."20-wlan0" = {
@@ -117,11 +117,14 @@ in
   services.udev.packages = [ pkgs.usbutils ];
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
   nix.settings.auto-optimise-store = true;
-  nix.gc = {
-    automatic = true;
-    dates = "weekly";
-    options = "--delete-older-than 14d";
-  };
+  # 绝不自动 GC：`nix.gc.automatic` 跑的是 `nix-collect-garbage -d`，它删掉旧 generation 之后
+  # 会把**不可达**的 store 路径一并删掉。这台机的 profile 经常被手动指来指去
+  # （25.05 ⇄ 26.11 来回切），于是一次 GC 就能把正在运行的系统删成半空：
+  #   Cannot execute /run/current-system/sw/bin/bash: No such file or directory
+  # （2026-11-17 03:43 那次 26.11 启动的落盘日志里 stage-2 一切正常，
+  #   但一分钟后 wpa_supplicant/gadget 帮手全部 exec 失败、Wi-Fi 与 USB 同时消失）
+  # 需要清理时人工 `nix-collect-garbage --delete-older-than 30d`，并先给要保留的闭包建 GC 根。
+  nix.gc.automatic = false;
   nixpkgs.config.allowUnfree = true;
   documentation.nixos.enable = false;
   documentation.man.enable = false;

@@ -289,6 +289,18 @@ in
         echo 1c00000.pcie > "$D/bind" 2>/dev/null || true
         sleep 5
       fi
+
+      # PCIe 兜底重训：26.11 上 qcom-pcie 常常 deferred probe 到无人重试，
+      # 这里显式 unbind/bind 一次把链路拉起来（25.05 时期就是靠这段才 link up 的）。
+      if [ ! -d /sys/class/net/wlan0 ]; then
+        echo "PCIe 重训：unbind/bind"
+        echo 1c00000.pcie > "$D/unbind" 2>/dev/null || true
+        sleep 2
+        echo 1c00000.pcie > "$D/bind" 2>/dev/null || true
+        i=0
+        while [ $i -lt 20 ] && [ ! -d /sys/class/net/wlan0 ]; do sleep 1; i=$((i+1)); done
+      fi
+      echo "VENUS_WIFI_SETUP_DONE wlan0=$([ -d /sys/class/net/wlan0 ] && echo yes || echo no)"
       ip -4 -o addr show wlan0 2>/dev/null || echo "警告：wlan0 没有地址"
 
       if [ "''${VENUS_BLUETOOTH:-0}" = 1 ]; then
@@ -550,11 +562,23 @@ in
     wantedBy = [ "sysinit.target" ];
     after = [ "venus-boot-activate.service" ];
     before = [ "sysinit.target" ];
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 20; };
+    # 必须前台同步跑完：脚本里要做“开五路 regulator → pcie bind 重训 → 等 wlan0”。
+    # 之前用 `setsid ... & exit 0` 丢到后台，systemd 立刻认为上电完成，
+    # 而 PCIe 在那一刻电源还没就位 → qcom-pcie probe 失败 → deferred probe 没人再触发。
+    # 实证：2026-11-17 13:44 那次 26.11 启动的设备日志里
+    #   journalctl -b | grep -c pcie  →  0     （整场没有 qcom-pcie 一行）
+    #   而同一硬件在 25.05 上每次都有 `qcom-pcie: PCIe Gen.3 x1 link up`
+    #   ip addr 只有 lo，没有 wlan0。
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 120; };
     environment.VENUS_BLUETOOTH = lib.boolToString config.venus.bluetooth;
     script = ''
       ${pkgs.util-linux}/bin/setsid /etc/venus-wifi-setup >/var/log/venus-wifi.log 2>&1 &
-      exit 0
+      # setsid 只是为了脱离控制终端；这里等它真正做完（脚本末尾会写 DONE 标记）
+      i=0
+      while [ $i -lt 100 ] && ! ${pkgs.gnugrep}/bin/grep -q VENUS_WIFI_SETUP_DONE /var/log/venus-wifi.log 2>/dev/null; do
+        sleep 1
+        i=$((i + 1))
+      done
     '';
   };
 

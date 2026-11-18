@@ -24,10 +24,27 @@ in
   #   "Couldn't initialize supplicant interface: Failed to D-Bus activate wpa_supplicant service"
   # 导致 wlan0 一直 unavailable；而 networking.wireless 直接给 wpa_supplicant + 固定 IP，实测可用。
   networking.networkmanager.enable = false;
+  # 不再用 networks.<ssid> 让 nixpkgs 自动生成（它会生成两条同 SSID 的 network 块，
+  # 一条带 SAE/FT-SAE、一条不带，再叠加全局 pmf=1）。实测（2026-11-18 16:17 启动）：
+  #   wlan0: authenticate with be:fc:e7:9e:e8:d5     ← 这个 BSSID 能过
+  #   wlan0: authenticate with be:fc:e7:9e:e8:d4     ← 之后一直黏在这个 BSSID 上失败
+  # 同一 SSID 在 AP 上对应两个 BSSID（2.4G/5G 两个 radio），协商参数与其中一个
+  # radio 不匹配就永远轮不回来，表现为"WiFi 时好时坏"。
+  # 改成单一 network 块，钉死能用的 BSSID 与频段。
   networking.wireless = {
     enable = true;
     userControlled.enable = false;
-    networks."moli-1004-backup" = { psk = "__SECRET_VENUS_WIFI_PSK__"; };
+    networks = { };
+    extraConfig = ''
+      network={
+        ssid="moli-1004-backup"
+        bssid=be:fc:e7:9e:e8:d5
+        key_mgmt=WPA-PSK
+        psk="__SECRET_VENUS_WIFI_PSK__"
+        scan_freq=5180
+        priority=1
+      }
+    '';
   };
   networking.useNetworkd = true;
   systemd.network.networks."20-wlan0" = {

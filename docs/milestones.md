@@ -95,4 +95,11 @@ WiFi 未通，不计入本里程碑。
 - USB ACM 串口在 switch-root 后 `UDC` 落回 `default`，主机不再配置设备；
   拔插数据线也不恢复（设备侧 `current_speed=high-speed` 说明链路正常，
   是 PVE 没把该 USB 设备直通回 `MOLI-VM`）。串口不再是主通道，不计入本里程碑。
-- OTG（USB 口外接键鼠）未做，作为下一个里程碑。
+- OTG（USB 口外接键鼠）**已放弃**（2026-11-18）：
+  1. `dr_mode = "host"` 单独改是可行的 —— 实测 xHCI 正常起来（`lsusb` 有 USB2/USB3
+     两个 root hub），WiFi 与启动均不受影响。
+  2. 但端口要对外供 5V 必须驱动 `pm8350_gpios 8`（vendor `xiaomi-sm8350-common.dtsi`
+     的 `vbus-out-gpio`）。一旦常开供电、同时接着 PC，就是两端对顶；
+     实测结果是黑屏、USB 全无、需人工进 fastboot。
+  3. 用户明确不接受烧机风险，因此 OTG 整项放弃，仓库与设备均回到 `dr_mode = "peripheral"`
+     （里程碑镜像 70e14e69…）。不再尝试该方向。

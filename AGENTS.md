@@ -15,7 +15,7 @@
 | WiFi（WCN6851） | `wlan0 UP 192.168.0.150/24`；SSID `moli-1004-backup`；2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2；`ath11k_pci wcn6855 hw1.1` fw `0x11008104`；`MHI_CB_EE_RDDM` = 0 |
 | 系统 | 冷启动 2/2，41 秒 ping 通；`systemctl --failed` = 0 |
 | 串口 | 不可用（switch-root 后 UDC 回 `default`；PVE 未把该 USB 直通回 MOLI-VM） |
-| OTG | 未做，下一里程碑 |
+| OTG（外接键鼠/U 盘） | **已放弃**（2026-11-18 决定）：host 模式与 xHCI 可用，但端口 5V 需由 `pm8350_gpios 8` 输出；手机接 PC 时两端同时供 5V 会造成电气对顶（实测黑屏、需人工进 fastboot）。用户不接受烧机风险，故不做。详见 docs/experiments.md |
 
 **调试一律走 WiFi SSH：`root@192.168.0.150`。** 串口不再是主通道。
 

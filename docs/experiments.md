@@ -207,3 +207,21 @@ ath11k_pci 0000:01:00.0: fw_version 0x11008104 ... WLAN.HSP.1.1.c3-00260-...
 （一条含 SAE/FT-SAE）+ 全局 `pmf=1`，客户端会黏在 `…:d4` 上反复重试。
 已改为单一 network 块并钉死 `bssid=be:fc:e7:9e:e8:d5` + `scan_freq=5180`，
 实测 `journalctl -b | grep -c "e8:d4"` = 0。
+
+## 2026-11-18 OTG 实验（结论：放弃，硬体风险）
+
+| # | 假设 | 唯一变量 | 结果 | 结论 |
+|---|---|---|---|---|
+| 1 | dwc3 改 host 后 xHCI 能起来 | `dr_mode` peripheral→host（其余不动） | ✅ `lsusb` 出现 USB2(480M)/USB3(10000M) 两个 root hub，`dmesg` 有 xhci 7 行；WiFi 与启动均正常 | 成立 |
+| 2 | 端口需 VBUS 才能枚举外设 | 加 `regulator-fixed`(pm8350 gpio8)+`regulator-always-on` | ❌ 黑屏、USB 全无、需人工进 fastboot | 无效实验（且危险） |
+| 3 | VBUS 改为用户态可控（默认关） | `regulator-output` 包一层，`echo enabled` 打开 | ✅ `regulator-usb-vbus-ctl/state` 可写，`gpio8` 变 `out high`；但插 U 盘仍不枚举 | 部分成立：供电路径通了，枚举仍不通 |
+
+关键分析：
+- `dr_mode=host` 单独改是安全的，可作为将来参考（xHCI 正常）。
+- 危险点在 VBUS：手机接 PC 时 PC 也在供 5V，`always-on` 造成两端对顶，
+  触发端口保护 → 整机黑屏。这类实验必须断开 PC 数据线、用电池供电。
+- 第 3 步即使供电开到位，插 U 盘仍无 `new high-speed USB device`，说明还缺
+  vendor 侧的角色/ID 或 boost 时序（vendor 走 `extcon_usb1` + `usb2_vbus_boost`
+  的 pinctrl 默认 `output-low` + 运行时切换），继续排查需要直接驱动 PMIC 供电电路。
+- **用户明确不接受烧机风险，OTG 整项终止。** 仓库 DTS 与设备 boot 均回到
+  `dr_mode = "peripheral"`（里程碑镜像 md5 `70e14e69afb887b924b2f9aba02f0110`）。

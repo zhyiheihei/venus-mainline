@@ -13,6 +13,11 @@ in
 {
   lantian.kernel = lib.mkForce (crossPkgs.callPackage ./kernel.nix { debug = config.venus.debug.enable; });
 
+  # fleet 用 impermanence：/ 在 tmpfs，只有 /nix 落盘，所以状态目录是 /nix/persistent，
+  # 而板级模块（deadman/bootdump/probe/usb-state）都写 /persistent。这里做一条符号链，
+  # 让两套布局共用同一批路径，不必改板级模块。
+  systemd.tmpfiles.rules = [ "L+ /persistent - - - - /nix/persistent" ];
+
   # fleet（server 角色）不需要 USB gadget：keepalive 是 Type=simple 的常驻循环，
   # 在 nixos-config 的 lantian.harden 策略里必须给 hardening+confinement，
   # 而这块板子只需要 WiFi + SSH，故直接关掉 USB gadget 相关单元。

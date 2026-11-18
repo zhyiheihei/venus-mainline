@@ -525,7 +525,11 @@ in
         sleep 90
         i=$((i + 1))
         # set -e 下 grep -c 零匹配会中止脚本，必须 || true
-        ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show 2>/dev/null | grep -c 'inet ' || true)
+        # 注意：`ip -4 -br addr` 的简要输出里**没有** "inet" 字样
+        # （形如 "wlan0 UP 192.168.0.150/24"），用它 grep 'inet ' 永远是 0，
+        # 于是 deadman 误判"无网"并在 3 次后回滚重启 —— 2026-11-18 实测：
+        # WiFi 明明通着，设备每 4~5 分钟自己重启一次。必须用非简要输出。
+        ip4=$(${pkgs.iproute2}/bin/ip -4 addr show dev wlan0 2>/dev/null | grep -c 'inet ' || true)
         udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || echo none)
         echo "deadman: check $i/3 ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" >> /persistent/venus-deadman.log
         if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then

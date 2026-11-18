@@ -30,7 +30,10 @@ in
     };
   };
   sops.secrets."venus-wifi-secrets" = {
-    sopsFile = inputs.secrets + "/per-host/wifi/venus.yaml";
+    # 用 LT.secret 而不是 inputs.secrets + "..."：后者会把整个 secrets 仓库的
+    # store 路径（string context）带进系统闭包，触发 nixos-config 的
+    # system.forbiddenDependenciesRegexes 断言（secrets-closure.nix）。
+    sopsFile = LT.secret "per-host/wifi/venus.yaml";
     key = "wpa-secrets";
     owner = "wpa_supplicant";
     mode = "0400";

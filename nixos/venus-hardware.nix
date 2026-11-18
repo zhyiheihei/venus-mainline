@@ -515,7 +515,9 @@ in
         echo "deadman: 已重试 $n 次，放弃自动重启" | tee -a /persistent/venus-deadman.log
         exit 0
       fi
-      ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show wlan0 2>/dev/null | grep -c 'inet ')
+      # 注意：systemd 的 unit-script 带 set -e，而 `grep -c` 在零匹配时返回 1，
+      # 直接写进 $( ) 会让整个脚本立刻退出（2026-11-18 实测 deadman 每次都在启动同一秒失败）。
+      ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show wlan0 2>/dev/null | grep -c 'inet ' || true)
       udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || true)
       echo "deadman: n=$n ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" | tee -a /persistent/venus-deadman.log
       if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then

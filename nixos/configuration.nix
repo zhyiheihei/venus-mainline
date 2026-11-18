@@ -9,7 +9,7 @@ in
 {
   imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
 
-  venus.debug.enable = true;
+  venus.debug.enable = false;  # rd.debug/loglevel=8/oops=panic 会把 115200 串口灌爆并让 panic 变致命
 
   boot.kernelPackages = pkgs.linuxKernel.packagesFor (venusCross.callPackage ./kernel.nix { });
 
@@ -32,6 +32,9 @@ in
   networking.useNetworkd = true;
   systemd.network.networks."20-wlan0" = {
     matchConfig.Name = "wlan0";
+    # MAC 必须与静态地址在同一个 .network 文件里：networkd 每个 link 只用一个文件，
+    # 早前拆成 10-wlan0(MAC) + 20-wlan0(IPv4) 时，20 从未生效 → 只有 IPv6、无 192.168.0.150。
+    linkConfig.MACAddress = "02:11:22:3c:4d:5e";
     networkConfig = {
       DHCP = "no";
       DNS = [ wifiGw "223.5.5.5" ];

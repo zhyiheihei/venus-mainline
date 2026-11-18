@@ -25,7 +25,7 @@ let
       mkdir -p "$G/configs/c.1/strings/0x409" || true
       echo "ACM" > "$G/configs/c.1/strings/0x409/configuration" || true
       echo 250 > "$G/configs/c.1/MaxPower" || true
-      rm -f "$G/configs/c.1/acm.GS0" "$G/configs/c.1/rndis.usb0"
+      rm -f "$G/configs/c.1/acm.GS0" "$G/configs/c.1/rndis.usb0" || true
       ln -s "$G/functions/acm.GS0" "$G/configs/c.1/acm.GS0" || true
       if [ "$mode" = full ]; then
         ln -s "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0" || true
@@ -153,10 +153,13 @@ in
   # 固定 wlan0 的 MAC。必须带 [Match]，否则 26.11 的 systemd-networkd 直接判定该文件无效：
   #   "10-wlan0.network: No valid settings found in the [Match] section, ignoring file"
   # （25.05 的 257.0 会容忍，26.11 的 257.10 不容忍）
-  systemd.network.networks."10-wlan0" = {
-    matchConfig.Name = "wlan0";
-    linkConfig.MACAddress = lib.mkDefault "02:11:22:3c:4d:5e";
-  };
+  # 注意：systemd-networkd 对每个 link 只会选**一个** .network 文件（按文件名排序取第一个
+  # 匹配项），不会叠加。所以 MAC 设置不能单独放一个 10-wlan0.network ——
+  # 它会抢在 20-wlan0.network（静态 IPv4）之前匹配，导致 20 永远不生效（无 IPv4）。
+  # 2026-11-18 实测日志：
+  #   wlan0: Configuring with /etc/systemd/network/10-wlan0.network.
+  #   （再没有任何 20-wlan0 的行，ip -br addr 只有 IPv6）
+  # 因此这里不建独立文件，改为把 MAC 合进 20-wlan0（见 configuration.nix）。
   # 内核没有 CONFIG_RFKILL（device.config 里 "# CONFIG_RFKILL is not set"），
   # /dev/rfkill 不存在；而 nixpkgs 的 wpa_supplicant.service 把 /dev/rfkill 写死在
   # BindPaths 里，缺这个节点时启动直接 226/NAMESPACE：
@@ -237,8 +240,11 @@ in
   systemd.services."serial-getty@ttyGS0" = {
     enable = true;
     wantedBy = [ "getty.target" ];
+    # 不能 requires venus-acm：26.11 上 venus-acm 的 After=systemd-udev-settle.service
+    # 所指单元已不存在，一旦它失败，getty 就永远不启动 —— 串口彻底失声（2026-11-17 实测）。
     after = [ "venus-acm.service" ];
-    requires = [ "venus-acm.service" ];
+    # ttyGS0 由 initrd 的 venus-serial 建好；若真没有，agetty 会失败并 3 秒后重试。
+    restartIfChanged = false;
     serviceConfig = {
       Restart = "always";
       RestartSec = 3;
@@ -366,6 +372,7 @@ in
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      TimeoutStartSec = 25;
       TimeoutStopSec = 1;
       KillSignal = "SIGKILL";
     };
@@ -376,21 +383,20 @@ in
       venus_usb_create acm
       venus_usb_bind
       n=0
-      while [ ! -c /dev/ttyGS0 ] && [ $n -lt 20 ]; do
+      while [ ! -c /dev/ttyGS0 ] && [ $n -lt 5 ]; do
         sleep 1
         n=$((n + 1))
       done
       if [ -c /dev/ttyGS0 ]; then
         ( setsid sh </dev/ttyGS0 >/dev/ttyGS0 2>&1 & ) || true
       fi
-      n=0
-      while [ ! -d /sysroot/persistent ] && [ $n -lt 40 ]; do
-        sleep 1
-        n=$((n + 1))
-      done
       # 关键取证：无论后面 stage-2 是否起得来，都把 initrd 阶段的证据落到 /persistent，
       # 这样即使整机黑屏（无串口、无 WiFi），下次启动别的镜像也能读到这次失败现场。
-      if [ -d /sysroot/persistent ]; then
+      # 绝不在 initrd 里自己挂 rootfs：switch-root 前遗留多余挂载是切换失败的已知来源。
+      # 落盘只在 sysroot 已挂好时做（它由 sysroot.mount 负责），否则放弃。
+      VLOGDIR=/sysroot/persistent
+      [ -d "$VLOGDIR" ] || VLOGDIR=""
+      if [ -n "${VLOGDIR:-}" ] && [ -d "${VLOGDIR:-/nonexistent}" ]; then
         {
           echo "=== $(date '+%F %T') initrd dmesg ==="
           dmesg 2>/dev/null | tail -200
@@ -400,7 +406,7 @@ in
           ls /sys/kernel/config/usb_gadget 2>/dev/null
           echo "=== rfkill ==="
           ls -l /dev/rfkill 2>/dev/null
-        } > /sysroot/persistent/venus-initrd-boot.log 2>&1
+        } > "$VLOGDIR/venus-initrd-boot.log" 2>&1
       fi
       if [ -d /sysroot/persistent ]; then
         VLOG=/sysroot/persistent/venus-usb-state.log
@@ -505,10 +511,13 @@ in
       set -u
       S=/persistent/venus-deadman.count
       n=$(cat "$S" 2>/dev/null || echo 0)
-      [ "$n" -ge 3 ] && { echo "deadman: 已重试 $n 次，放弃自动重启"; exit 0; }
+      if [ "$n" -ge 3 ]; then
+        echo "deadman: 已重试 $n 次，放弃自动重启" | tee -a /persistent/venus-deadman.log
+        exit 0
+      fi
       ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show wlan0 2>/dev/null | grep -c 'inet ')
       udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || true)
-      echo "deadman: ip4=$ip4 udc=$udc"
+      echo "deadman: n=$n ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" | tee -a /persistent/venus-deadman.log
       if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then
         echo $((n + 1)) > "$S"
         # 自愈：把 /persistent 里备份的可用 boot.img 写回 boot_b 再重启，

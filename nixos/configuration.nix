@@ -2,6 +2,15 @@
 { config, lib, modulesPath, options, pkgs, venusCross, ... }:
 
 let
+<<<<<<< HEAD
+=======
+  # 从 Android 的 modem 分区提取出来的厂商固件（bdwlan ELF 当 board.bin 用，
+  # ath11k 见 ELF 头会走 BDF_TYPE_ELF 分支并跳过 CAL 数据）
+  venusFirmware = pkgs.runCommandLocal "venus-firmware" { } ''
+    mkdir -p $out/lib/firmware
+    cp -r ${./firmware}/. $out/lib/firmware/
+  '';
+>>>>>>> main
   wifiIp = "192.168.0.150";
   wifiGw = "192.168.0.1";
   wifiMac = "02:11:22:3c:4d:5e";
@@ -42,6 +51,17 @@ in
     address = [ "${wifiIp}/24" ];
     routes = [ { Destination = "0.0.0.0/0"; Gateway = wifiGw; } ];
   };
+<<<<<<< HEAD
+=======
+  networking.networkmanager.enable = false;
+  networking.wireless = {
+    enable = true;
+    userControlled.enable = false;
+    networks."moli-1004-backup" = { psk = "__SECRET_VENUS_WIFI_PSK__"; };
+  };
+  # wlan0 是运行后期才出现的，NixOS 的 network-addresses-wlan0 在开机时找不到设备，
+  # 地址由 venus-wifi-power 服务自己加。
+>>>>>>> main
   systemd.services."network-addresses-wlan0".enable = false;
   systemd.services."network-setup".enable = false;
 

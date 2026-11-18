@@ -42,9 +42,13 @@
 	qcom,board-id = <0x10008 0x0>;
 	chassis-type = "handset";
 
+<<<<<<< HEAD
 	/* 内存布局交给 ABL 按实际 DDR 容量填(与 stock venus DT 一致: 下游 base DTB 里
 	 * 就是这个全零占位)。不要写死: 8GB 与 12GB 机型的映射不同, 写死旧机的值在
 	 * 新机上必然错。 */
+=======
+	/* 内存布局交给 ABL 按实际 DDR 容量注入（本机为 12GB 机型）。 */
+>>>>>>> main
 	memory {
 		device_type = "memory";
 		reg = <0x00 0x00 0x00 0x00>;
@@ -86,7 +90,11 @@
 
 
 	reserved-memory {
+<<<<<<< HEAD
 		/* venus 的 ABL splash 区(取自手机真实 DT: splash_region 0xea600000 +0x2300000) */
+=======
+		/* venus 的 ABL splash 区（本机真实 DT: 0xea600000 +0x2300000） */
+>>>>>>> main
 		cont_splash_mem: memory@ea600000 {
 			reg = <0 0xea600000 0 0x2300000>;
 			no-map;
@@ -153,8 +161,12 @@
 		};
 
 		removed_mem: memory@d8800000 {
+<<<<<<< HEAD
 			/* 手机真实 DT: removed_region 0xd8800000 +0xa000000 (旧值 0x8800000 偏小,
 			 * 少 reserve 的 24MB 会被内核当普通 RAM 用) */
+=======
+			/* 本机真实 DT: removed_region 0xd8800000 +0xa000000 */
+>>>>>>> main
 			reg = <0 0xd8800000 0 0xa000000>;
 			no-map;
 		};
@@ -1216,8 +1228,12 @@
 	};
 };
 
+<<<<<<< HEAD
 /* 手机真实 DT: xbl_aop_region@80600000 +0x260000。mainline sm8350.dtsi 里写的是
  * 0x80700000 +0x160000, 少了下面这 1MB, 内核会把它当可用内存分配出去。 */
+=======
+/* 本机真实 DT: xbl_aop_region@80600000 +0x260000（mainline dtsi 少 reserve 1MB）。 */
+>>>>>>> main
 &xbl_aop_mem {
 	reg = <0x0 0x80600000 0x0 0x260000>;
 };

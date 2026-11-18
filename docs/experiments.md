@@ -154,3 +154,34 @@ CHECKPOINT_RESTORE/APPARMOR/HARDENED_USERCOPY/FORTIFY_SOURCE），而不是用�
 本次同时修复了一个真 bug：`/etc/venus-wifi-setup` 里 `$D` 从未定义（脚本 `set -u`），
 导致 PCIe unbind/bind 兜底重训**从未执行过**；已补 `D=/sys/bus/platform/drivers/qcom-pcie`，
 并新增 `regulator-wlan-en-ctl` 使能（exp1 已证明缺 wlan_en 时芯片完全不上电）。
+
+## 2026-11-18 26.11 WiFi 打通（有效实验，里程碑 M2）
+
+| 项 | 值 |
+|---|---|
+| 假设 | 26.11 上 `wlan0` 不出现/不通，是用户态配置问题，不是内核或 DTB |
+| 唯一变量 | `20-wlan0.network` 合并 MAC 后重建闭包（其余五件同源） |
+| 六件套 | kernel/initrd/dtb 全部来自 `kh69hbzs…`；`init=kh69hbzs…/init`；boot.img md5 `b27358a998499649de58f4b19cad5b34` |
+| 判据 | L1 `wlan0` 目录存在；L2 有 IPv4 `192.168.0.150`；L3 SSH 可登录 |
+| 结果 | L1/L2/L3 全通过，冷启动 2/2 |
+| 结论 | 成立 |
+
+关键日志原句：
+
+```
+systemd-networkd[466]: wlan0: Configuring with /etc/systemd/network/10-wlan0.network.
+systemd-networkd[466]: wlan0: Connected WiFi access point: moli-1004-backup (be:fc:e7:9e:e8:d5)
+wpa_supplicant[737]: wlan0: CTRL-EVENT-CONNECTED - Connection to be:fc:e7:9e:e8:d5 completed
+ath11k_pci 0000:01:00.0: wcn6855 hw1.1
+ath11k_pci 0000:01:00.0: fw_version 0x11008104 ... WLAN.HSP.1.1.c3-00260-...
+```
+
+反证：`ip -br addr show wlan0` 在修复前只有 IPv6（`fc00:…`、`240e:…`），
+说明链路与关联都正常，缺的只是 IPv4 —— 因此此前所有"WiFi 没通"的判断都被这一条污染过。
+
+## 2026-11-18 deadman 秒退（无效自动化，已修）
+
+`venus-deadman.service` 每次在启动同一秒 `status=1/FAILURE`。原因：systemd 的 unit-script
+带 `set -e`，而 `ip4=$(ip -4 … | grep -c 'inet ')` 在零匹配时 `grep` 返回 1，赋值失败即退出。
+修法 `grep -c … || true`（闭包 `k6hxwm70`，已构建未部署）。
+这是本轮之前反复需要人工进 fastboot 的直接原因。

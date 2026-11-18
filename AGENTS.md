@@ -3,6 +3,31 @@
 小米 11（venus / SM8350）的 standalone NixOS。目标是系统跑通、WiFi 可用、串口可用，
 日志里不留异常。fleet 角色在本机 standalone 清零前不碰。
 
+## 当前状态（2026-11-18，里程碑 M2）
+
+**系统已是 NixOS 26.11，WiFi 可用**（详见 `docs/milestones.md` 的 M2）。
+闭包 `kh69hbzshy2838c2g6rhms8r63dkrckb`，boot.img md5 `b27358a998499649de58f4b19cad5b34`。
+
+| 能力 | 实测 |
+|---|---|
+| WiFi（WCN6851） | `wlan0 UP 192.168.0.150/24`；SSID `moli-1004-backup`；2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2；`ath11k_pci wcn6855 hw1.1` fw `0x11008104`；`MHI_CB_EE_RDDM` = 0 |
+| 系统 | 冷启动 2/2，41 秒 ping 通；`systemctl --failed` = 0 |
+| 串口 | 不可用（switch-root 后 UDC 回 `default`；PVE 未把该 USB 直通回 MOLI-VM） |
+| OTG | 未做，下一里程碑 |
+
+**调试一律走 WiFi SSH：`root@192.168.0.150`。** 串口不再是主通道。
+
+三条容易重踩的坑：
+
+1. `systemd-networkd` **每个 link 只用一个 `.network` 文件**（按文件名取第一个匹配）。
+   把 MAC 放 `10-wlan0`、IPv4 放 `20-wlan0` 时只会应用前者 → 只有 IPv6、没有
+   `192.168.0.150` → 看起来"WiFi 没通"，实际 wpa_supplicant 早已关联成功。
+   MAC 与地址必须写在同一个文件里。
+2. `venus.debug.enable = true` 会往 cmdline 注入 `rd.debug` / `loglevel=8` /
+   `oops=panic` / `panic=30`，在唯一 115200 串口上等于把启动拖成分钟级，且任何 oops 变致命。
+3. systemd 的 unit-script 带 `set -e`：`x=$(... | grep -c ...)` 在零匹配时会让整个脚本
+   立刻退出（`venus-deadman` 因此每次都秒退，从未能自动回滚）。
+
 ## 0. 范围
 
 - 只做 standalone（本仓库 `nixosConfigurations.venus`）。

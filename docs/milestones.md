@@ -45,8 +45,8 @@ WiFi 未通，不计入本里程碑。
 
 | 项 | 值 |
 |---|---|
-| 闭包 | `/nix/store/kh69hbzshy2838c2g6rhms8r63dkrckb-nixos-system-venus-26.11.20260914.efe6f07` |
-| boot.img | `/persistent/boot-kh69.img`（44298240 字节，md5 `b27358a998499649de58f4b19cad5b34`） |
+| 闭包 | `/nix/store/9a8mifabcqijyhz6g30s6ca2rac1h039-nixos-system-venus-26.11.20260914.efe6f07`（初版 kh69hbzs，加固后 9a8mifab） |
+| boot.img | `/persistent/boot-milestone.img`（44298240 字节，md5 `70e14e69afb887b924b2f9aba02f0110`） |
 | DTB | `527c521e5fb792c27608dbfc820f864b` |
 | 实测 | 冷启动 2/2：41 秒 ping 通；`wlan0 UP 192.168.0.150/24`；SSID `moli-1004-backup`；rx/tx `2401.9 MBit/s 160MHz HE-MCS 11 HE-NSS 2`，signal -14 dBm；`ath11k_pci … wcn6855 hw1.1`，`fw_version 0x11008104`（WLAN.HSP.1.1.c3-00260）；`journalctl -b \| grep -c pcie` = 24；`MHI_CB_EE_RDDM` = 0；`systemctl --failed` = 0 |
 
@@ -72,9 +72,23 @@ WiFi 未通，不计入本里程碑。
 **回滚策略（单槽单系统，2026-11-18 起）**：
 
 - 只有 26.11，不再保留 25.05 作为回退目标。`boot_a` 不再使用。
-- 里程碑镜像固定为 `/persistent/boot-milestone.img`（= 本节 boot.img，md5 `70aaf450f373e5f528eb806cb22c2d87`）。
+- 里程碑镜像固定为 `/persistent/boot-milestone.img`（md5 `70e14e69afb887b924b2f9aba02f0110`），
+  对应闭包记在 `/persistent/boot-milestone.closure`（deadman 用它判断"当前是否已是里程碑"）。
 - `venus-deadman` 连续 3 次（每 90 秒）判定「无 IPv4 且 UDC 未 configured」时，先把当前
   `boot_b` 存成 `/persistent/boot-lastbad.img`，再回写里程碑镜像并重启；最多 3 次。
+
+**里程碑之后的两处加固（2026-11-18，均已实测）**：
+
+1. **WiFi 钉死 BSSID**：`networking.wireless.networks = { }` + `extraConfig` 单一 network 块
+   （`bssid=be:fc:e7:9e:e8:d5`、`scan_freq=5180`）。原因：nixpkgs 会为同一 SSID 生成两条块
+   （一条含 SAE/FT-SAE），叠加 `pmf=1`；实测出现
+   `wlan0: authenticate with …:d5`（成功）后一直黏在 `…:d4` 上认证失败，
+   表现为"WiFi 时好时坏"。
+2. **deadman 的 IPv4 检测修正**：原来用 `ip -4 -br addr show | grep -c 'inet '`，
+   而 `-br` 输出里没有 "inet" 字样（形如 `wlan0 UP 192.168.0.150/24`），于是恒判为"无网"，
+   每 4~5 分钟自动回滚重启一次 —— **这是当天反复"失联"的主因**。
+   改为 `ip -4 addr show dev wlan0 | grep -c 'inet '` 后实测
+   `deadman: check 1/3 ip4=1`，uptime 13 分钟仍在线。
 
 **遗留**：
 

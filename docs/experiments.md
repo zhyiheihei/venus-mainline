@@ -185,3 +185,25 @@ ath11k_pci 0000:01:00.0: fw_version 0x11008104 ... WLAN.HSP.1.1.c3-00260-...
 带 `set -e`，而 `ip4=$(ip -4 … | grep -c 'inet ')` 在零匹配时 `grep` 返回 1，赋值失败即退出。
 修法 `grep -c … || true`（闭包 `k6hxwm70`，已构建未部署）。
 这是本轮之前反复需要人工进 fastboot 的直接原因。
+
+## 2026-11-18 「开机几分钟就失联」的真因：deadman 误判（有效实验，已修）
+
+| 项 | 值 |
+|---|---|
+| 现象 | WiFi 已连上（PING/SSH 正常、`iw link` 2401.9 MBit/s），设备仍在 4~5 分钟后自己重启 |
+| 唯一变量 | 修 deadman 的 IPv4 检测方式 |
+| 判据 | `/persistent/venus-deadman.log` 出现 `ip4=1`，且 10 分钟不回滚 |
+| 结果 | 通过（闭包 `9a8mifab`；`ip4=1`，uptime 826s 仍在线） |
+
+根因两条，都在 deadman 的判定里：
+
+1. `ip -4 -br addr show` 的简要输出**没有** "inet" 字样
+   （`wlan0            UP             192.168.0.150/24`），`grep -c 'inet '` 恒为 0 →
+   永远判"无网" → 3 次后回滚重启。改用 `ip -4 addr show dev wlan0`。
+2. `grep -c` 零匹配返回 1，配合 unit-script 的 `set -e` 会让脚本秒退；已加 `|| true`。
+
+附：WiFi 认证抖动（同一现象的另一半）——AP 对该 SSID 广播两个 BSSID，
+`…:d5` 可用、`…:d4` 认证不过；nixpkgs 为同一 SSID 生成两条 network 块
+（一条含 SAE/FT-SAE）+ 全局 `pmf=1`，客户端会黏在 `…:d4` 上反复重试。
+已改为单一 network 块并钉死 `bssid=be:fc:e7:9e:e8:d5` + `scan_freq=5180`，
+实测 `journalctl -b | grep -c "e8:d4"` = 0。

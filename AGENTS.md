@@ -7,7 +7,8 @@
 ## 当前状态（2026-11-18，里程碑 M2）
 
 **系统已是 NixOS 26.11，WiFi 可用**（详见 `docs/milestones.md` 的 M2）。
-闭包 `kh69hbzshy2838c2g6rhms8r63dkrckb`，boot.img md5 `b27358a998499649de58f4b19cad5b34`。
+闭包 `9a8mifabcqijyhz6g30s6ca2rac1h039`，boot.img md5 `70e14e69afb887b924b2f9aba02f0110`
+（= `/persistent/boot-milestone.img`，deadman 的回滚目标）。
 
 | 能力 | 实测 |
 |---|---|
@@ -27,7 +28,11 @@
 2. `venus.debug.enable = true` 会往 cmdline 注入 `rd.debug` / `loglevel=8` /
    `oops=panic` / `panic=30`，在唯一 115200 串口上等于把启动拖成分钟级，且任何 oops 变致命。
 3. systemd 的 unit-script 带 `set -e`：`x=$(... | grep -c ...)` 在零匹配时会让整个脚本
-   立刻退出（`venus-deadman` 因此每次都秒退，从未能自动回滚）。
+   立刻退出；且 `ip -4 -br addr` 的**简要输出不含 "inet" 字样**（形如
+   `wlan0 UP 192.168.0.150/24`），用它 grep 'inet ' 恒为 0 —— 曾让 deadman 把
+   "WiFi 明明通着"误判成无网，每 4~5 分钟自动回滚重启（当天反复失联的主因）。
+4. `moli-1004-backup` 在 AP 上有两个 BSSID（`…:d5` 可用、`…:d4` 认证不过）。
+   wpa_supplicant 已钉死 `bssid=…:d5` + `scan_freq=5180`，不要改回 `networks.<ssid>`。
 
 ## 0. 范围
 
@@ -186,8 +191,9 @@
 - 刷机红线:绝不 flash xbl*/xbl_config*/abl/tz/hyp/keymaster/devcfg/cmnlib*/qupfw/imagefv/persist/modemst1/2 与分区表
 - **venus 的 ABL 不支持 `fastboot boot` 内存引导(静默不执行)**:日常验证只能写 `boot_b` 后 `reboot`
 - **单槽单系统**：只有 26.11。`boot_b` 是唯一引导入口，`boot_a` 不再使用（不刷、不切换）。
-  回滚目标是里程碑镜像 `/persistent/boot-milestone.img`（M2 的 boot.img，md5 `70aaf450…`），
-  由 `venus-deadman` 在连续 3 次（每 90 秒）判定无网且无串口时自动回写。
+  回滚目标是里程碑镜像 `/persistent/boot-milestone.img`（md5 `70e14e69…`），
+  对应闭包记在 `/persistent/boot-milestone.closure`；`venus-deadman` 连续 3 次（每 90 秒）
+  判定无网且无串口时才回写，且"当前已是里程碑闭包"时不回写（防死循环）。
 - 刷机操作走 Windows 主机(`ssh molis@192.168.0.143`,platform-tools 在 `C:\Users\molis\mi11\platform-tools`);
   本机 fastboot 大传输会断。**每次让用户操作前先声明需要的手机状态**
 - ROM 包与官方镜像常备 `~/mi11-work/`,官方恢复路径见 porting-notes(EvoX First Time Install)

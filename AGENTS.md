@@ -78,7 +78,7 @@
 
 | state | 含义 | 下一步 |
 |---|---|---|
-| `rescue`（ssh 22） | 旧版 standalone（25.05，带桌面，WiFi 正常） | 可 SSH，走第 3 节 |
+| `venus`（ssh 22） | 里程碑 M2：26.11 + WiFi 可用 | 可 SSH，走第 3 节 |
 | `fleet`（ssh 2222） | fleet 系统 | 同上（fleet 清零前不使用） |
 | `fastboot` | Windows `fastboot devices` 有序列号 | 只能做第 2 节允许的动作 |
 | `booting` | 有 ping 无 ssh | 等满 2 分钟再判 |
@@ -162,7 +162,7 @@
 
 绝不 flash：`xbl*`、`xbl_config*`、`abl`、`tz`、`hyp`、`keymaster`、`devcfg`、`cmnlib*`、
 `qupfw`、`imagefv`、`persist`、`modemst1/2` 与分区表。
-可写：`boot_a/b`、`dtbo_a/b`、`vendor_boot_a/b`、`vbmeta_a/b`、`userdata`。
+可写：`boot_b`、`dtbo_b`、`userdata`。（`boot_a`/`dtbo_a` 不再使用，见"单槽单系统"）
 
 ## 12. 代码与提交（留档是硬要求）
 
@@ -184,7 +184,10 @@
 - 本项目独立于 nixos-config 主仓,专门做小米11(venus)主线 Linux 适配,最终产出 NixOS
 - **新 agent 接手先读 docs/HANDOFF.md（设备现状/已证事实/坑位清单）与 docs/porting-notes.md**
 - 刷机红线:绝不 flash xbl*/xbl_config*/abl/tz/hyp/keymaster/devcfg/cmnlib*/qupfw/imagefv/persist/modemst1/2 与分区表
-- **venus 的 ABL 不支持 `fastboot boot` 内存引导(静默不执行)**:日常验证只能写 `boot_b`/`boot_a` 后 `reboot`
+- **venus 的 ABL 不支持 `fastboot boot` 内存引导(静默不执行)**:日常验证只能写 `boot_b` 后 `reboot`
+- **单槽单系统**：只有 26.11。`boot_b` 是唯一引导入口，`boot_a` 不再使用（不刷、不切换）。
+  回滚目标是里程碑镜像 `/persistent/boot-milestone.img`（M2 的 boot.img，md5 `70aaf450…`），
+  由 `venus-deadman` 在连续 3 次（每 90 秒）判定无网且无串口时自动回写。
 - 刷机操作走 Windows 主机(`ssh molis@192.168.0.143`,platform-tools 在 `C:\Users\molis\mi11\platform-tools`);
   本机 fastboot 大传输会断。**每次让用户操作前先声明需要的手机状态**
 - ROM 包与官方镜像常备 `~/mi11-work/`,官方恢复路径见 porting-notes(EvoX First Time Install)
@@ -222,12 +225,13 @@
 
 ## 基线原则
 
-- 代码基线 = 10-25 的 `86d6b46`（NixOS 25.05 跑通那版）。**唯一允许的偏离是 DTS 的内存布局**
-  （12GB 机型）：`memory {}` 占位交给 ABL 注入、`removed_mem` 0xa000000、
-  `cont_splash`/`framebuffer` 0xea600000、`dfps_data_mem` @0xec900000、
-  `xbl_aop_mem` 0x80600000+0x260000。
-- nixpkgs 必须 pin 在 `nixos-25.05`：26.11 求值 10-25 配置直接失败
-  （`boot.kernelPackages.kernel.buildDTBs` 缺失、`services.logind/journald.extraConfig` 已移除）。
+- **代码基线 = 里程碑 M2 的 26.11**（`docs/milestones.md`）。不再是 25.05 那版。
+- nixpkgs pin 在 `nixos-26.11`（`flake.lock` 固定 `26.11.20260914.efe6f07`）。
+- DTS 里唯一"为硬件而改"的部分是内存布局（12GB 机型）：`memory {}` 占位交给 ABL 注入、
+  `removed_mem` 0xa000000、`cont_splash`/`framebuffer` 0xea600000、
+  `dfps_data_mem` @0xec900000、`xbl_aop_mem` 0x80600000+0x260000。
+- 串口（USB gadget）在 26.11 上不可用（PVE 直通 + switch-root 后 UDC 回 default）；
+  调试一律走 WiFi SSH。做 OTG 时 gadget 会整体让位给 host 模式。
 - `nixos/configuration.nix` 里的 WiFi `psk` 只提交占位符，明文留在工作区。
 
 ## 构建与部署

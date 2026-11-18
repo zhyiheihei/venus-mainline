@@ -69,6 +69,13 @@ WiFi 未通，不计入本里程碑。
 `grep -c` 零匹配返回 1，**每次都在启动同一秒失败**，所以从未能自动回滚
 （这是本轮之前反复需要人工进 fastboot 的直接原因）。修法：`grep -c … || true`。
 
+**回滚策略（单槽单系统，2026-11-18 起）**：
+
+- 只有 26.11，不再保留 25.05 作为回退目标。`boot_a` 不再使用。
+- 里程碑镜像固定为 `/persistent/boot-milestone.img`（= 本节 boot.img，md5 `70aaf450f373e5f528eb806cb22c2d87`）。
+- `venus-deadman` 连续 3 次（每 90 秒）判定「无 IPv4 且 UDC 未 configured」时，先把当前
+  `boot_b` 存成 `/persistent/boot-lastbad.img`，再回写里程碑镜像并重启；最多 3 次。
+
 **遗留**：
 
 - USB ACM 串口在 switch-root 后 `UDC` 落回 `default`，主机不再配置设备；

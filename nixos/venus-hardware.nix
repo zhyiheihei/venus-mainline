@@ -505,29 +505,52 @@ in
   # multi-user.target 拖住（2026-11-17 16:09 实测：Startup finished 1min 44s，
   # WiFi/串口/keepalive 全部顺延，等于自杀）。改成 timer 触发。
   systemd.services.venus-deadman = {
-    description = "venus: 启动 3 分钟后若 WiFi 与串口都没起来就自动回滚并重启（最多 3 次）";
-    serviceConfig = { Type = "oneshot"; TimeoutStartSec = 200; };
+    description = "venus: 连续 3 次（每 90 秒）判定无网且无串口时回滚到里程碑镜像并重启";
+    serviceConfig = { Type = "oneshot"; TimeoutStartSec = 400; };
     script = ''
       set -u
       S=/persistent/venus-deadman.count
+      MILESTONE=/persistent/boot-milestone.img
       n=$(cat "$S" 2>/dev/null || echo 0)
       if [ "$n" -ge 3 ]; then
-        echo "deadman: 已重试 $n 次，放弃自动重启" | tee -a /persistent/venus-deadman.log
+        echo "deadman: 本次启动已回滚 $n 次，放弃（避免无限重启）" | tee -a /persistent/venus-deadman.log
         exit 0
       fi
-      # 注意：systemd 的 unit-script 带 set -e，而 `grep -c` 在零匹配时返回 1，
-      # 直接写进 $( ) 会让整个脚本立刻退出（2026-11-18 实测 deadman 每次都在启动同一秒失败）。
-      ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show wlan0 2>/dev/null | grep -c 'inet ' || true)
-      udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || true)
-      echo "deadman: n=$n ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" | tee -a /persistent/venus-deadman.log
-      if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then
+      # 连续 3 次（间隔 90 秒）都判定"无 IPv4 且 UDC 未 configured"才动手。
+      # 早前版本只等 240 秒判一次，把"还没起来"当成"起不来"，直接覆盖 boot_b，
+      # 毁掉正在进行的实验（2026-11-18 11:34 实测：host 模式实验被回滚成 25.05）。
+      bad=0
+      i=0
+      while [ "$i" -lt 3 ]; do
+        sleep 90
+        i=$((i + 1))
+        # set -e 下 grep -c 零匹配会中止脚本，必须 || true
+        ip4=$(${pkgs.iproute2}/bin/ip -4 -br addr show 2>/dev/null | grep -c 'inet ' || true)
+        udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || echo none)
+        echo "deadman: check $i/3 ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" >> /persistent/venus-deadman.log
+        if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then
+          bad=$((bad + 1))
+        else
+          bad=0
+          break
+        fi
+      done
+      # 保护：若当前启动的就是 milestone 对应的闭包，回写毫无意义（会把坏镜像刷回自己），
+      # 只记录并放弃。2026-11-18 实测踩过：milestone 在验证前被指向了坏镜像，
+      # deadman 于是把它回写了 3 次，设备始终起不来。
+      if [ "$(readlink -f /run/booted-system)" = "$(cat /persistent/boot-milestone.closure 2>/dev/null)" ]; then
+        echo "deadman: 当前已经是 milestone 闭包，不回写（只记录）" | tee -a /persistent/venus-deadman.log
+        exit 0
+      fi
+      if [ "$bad" -ge 3 ]; then
         echo $((n + 1)) > "$S"
-        # 自愈：把 /persistent 里备份的可用 boot.img 写回 boot_b 再重启，
-        # 否则这台机一旦刷了坏的引导镜像就只能靠人按住电源+音量键进 fastboot。
-        # 备份由部署脚本放在 /persistent/boot-backup-2505.img。
-        if [ -f /persistent/boot-backup-2505.img ]; then
-          echo "deadman: 回写 boot_b ← /persistent/boot-backup-2505.img"
-          dd if=/persistent/boot-backup-2505.img of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync 2>/dev/null
+        if [ -f "$MILESTONE" ]; then
+          # 先把当前引导镜像留一份现场，再回写里程碑镜像
+          dd if=/dev/disk/by-partlabel/boot_b of=/persistent/boot-lastbad.img bs=1M 2>/dev/null || true
+          echo "deadman: 回写 boot_b ← $MILESTONE（当前镜像已存 /persistent/boot-lastbad.img）" | tee -a /persistent/venus-deadman.log
+          dd if="$MILESTONE" of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync 2>/dev/null || true
+        else
+          echo "deadman: 缺 $MILESTONE，只重启不回滚" | tee -a /persistent/venus-deadman.log
         fi
         sync
         ${pkgs.systemd}/bin/systemctl reboot

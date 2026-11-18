@@ -1,10 +1,18 @@
 { config, lib, options, pkgs, ... }:
 
 let
-  venusFirmware = pkgs.runCommandLocal "venus-firmware" { } ''
-    mkdir -p $out/lib/firmware
-    cp -r ${./firmware}/. $out/lib/firmware/
-  '';
+  # 厂商固件（bdwlan 当 board.bin、amss/m3/regdb）不进 git（体积与版权），只在本机工作区存在。
+  # 做存在性判断：有则打进闭包；没有（例如从远端仓库构建 fleet 配置）则退回 nixpkgs 的
+  # linux-firmware，避免求值期报 "path .../nixos/firmware does not exist"。
+  hasLocalFirmware = builtins.pathExists ./firmware;
+  venusFirmware = pkgs.runCommandLocal "venus-firmware" { } (
+    if hasLocalFirmware then ''
+      mkdir -p $out/lib/firmware
+      cp -r ${./firmware}/. $out/lib/firmware/
+    '' else ''
+      mkdir -p $out/lib/firmware
+    ''
+  );
   venusGadget = ''
     venus_usb_log() {
       echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> ''${VLOG:-/persistent/venus-usb-state.log} 2>/dev/null || true
@@ -762,7 +770,8 @@ in
     enable = true;
     extraPackages = [ pkgs.mesa ];
   };
-  hardware.firmware = [ venusFirmware ];
+  hardware.firmware = [ venusFirmware ]
+    ++ lib.optionals (!hasLocalFirmware) [ pkgs.linux-firmware ];
 
   };
 }

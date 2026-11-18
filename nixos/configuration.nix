@@ -2,7 +2,7 @@
 { config, lib, modulesPath, options, pkgs, venusCross, ... }:
 
 let
-  wifiIp = "192.168.0.150";
+  wifiIp = "192.168.0.113";
   wifiGw = "192.168.0.1";
   wifiMac = "02:11:22:3c:4d:5e";
 in

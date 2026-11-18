@@ -197,7 +197,9 @@
 - 刷机操作走 Windows 主机(`ssh molis@192.168.0.143`,platform-tools 在 `C:\Users\molis\mi11\platform-tools`);
   本机 fastboot 大传输会断。**每次让用户操作前先声明需要的手机状态**
 - ROM 包与官方镜像常备 `~/mi11-work/`,官方恢复路径见 porting-notes(EvoX First Time Install)
-- 厂商固件文件不进 git(`nixos/firmware/` 已 gitignore),从 modem/vendor 分区提取
+- 厂商固件默认不进 git；**唯一例外是 `nixos/firmware/ath11k/WCN6855/hw1.1/`**
+  （amss/board/m3/regdb，共 4MB —— WiFi 必需，上游 linux-firmware 只有 hw2.0/hw2.1）。
+  其余（ADSP 11MB、GPU 等）仍 gitignore，从 modem/vendor 分区提取
 - **内核产物不进 git**(`nixos/kernel/` 已 gitignore):内核只能由源码 + `tools/apply-kernel-patches.sh` 重建
 - 提交用 conventional commits,中文说明原因,并写清「改了什么/为什么/怎么验证的/证据在哪」
 

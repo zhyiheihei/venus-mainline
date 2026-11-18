@@ -12,12 +12,12 @@
 
 | 能力 | 实测 |
 |---|---|
-| WiFi（WCN6851） | `wlan0 UP 192.168.0.113/24`；SSID `moli-1004-backup`；2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2；`ath11k_pci wcn6855 hw1.1` fw `0x11008104`；`MHI_CB_EE_RDDM` = 0 |
+| WiFi（WCN6851） | `wlan0 UP 192.168.0.68/24`；SSID `moli-1004-backup`；2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2；`ath11k_pci wcn6855 hw1.1` fw `0x11008104`；`MHI_CB_EE_RDDM` = 0 |
 | 系统 | 冷启动 2/2，41 秒 ping 通；`systemctl --failed` = 0 |
 | 串口 | 不可用（switch-root 后 UDC 回 `default`；PVE 未把该 USB 直通回 MOLI-VM） |
 | OTG（外接键鼠/U 盘） | **已放弃**（2026-11-18 决定）：host 模式与 xHCI 可用，但端口 5V 需由 `pm8350_gpios 8` 输出；手机接 PC 时两端同时供 5V 会造成电气对顶（实测黑屏、需人工进 fastboot）。用户不接受烧机风险，故不做。详见 docs/experiments.md |
 
-**调试一律走 WiFi SSH：`root@192.168.0.113`。** 串口不再是主通道。
+**调试一律走 WiFi SSH：`root@192.168.0.68`。** 串口不再是主通道。
 
 三条容易重踩的坑：
 
@@ -29,7 +29,7 @@
    `oops=panic` / `panic=30`，在唯一 115200 串口上等于把启动拖成分钟级，且任何 oops 变致命。
 3. systemd 的 unit-script 带 `set -e`：`x=$(... | grep -c ...)` 在零匹配时会让整个脚本
    立刻退出；且 `ip -4 -br addr` 的**简要输出不含 "inet" 字样**（形如
-   `wlan0 UP 192.168.0.113/24`），用它 grep 'inet ' 恒为 0 —— 曾让 deadman 把
+   `wlan0 UP 192.168.0.68/24`），用它 grep 'inet ' 恒为 0 —— 曾让 deadman 把
    "WiFi 明明通着"误判成无网，每 4~5 分钟自动回滚重启（当天反复失联的主因）。
 4. `moli-1004-backup` 在 AP 上有两个 BSSID（`…:d5` 可用、`…:d4` 认证不过）。
    wpa_supplicant 已钉死 `bssid=…:d5` + `scan_freq=5180`，不要改回 `networks.<ssid>`。

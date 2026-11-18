@@ -13,6 +13,12 @@ in
 {
   lantian.kernel = lib.mkForce (crossPkgs.callPackage ./kernel.nix { debug = config.venus.debug.enable; });
 
+  # fleet（server 角色）不需要 USB gadget：keepalive 是 Type=simple 的常驻循环，
+  # 在 nixos-config 的 lantian.harden 策略里必须给 hardening+confinement，
+  # 而这块板子只需要 WiFi + SSH，故直接关掉 USB gadget 相关单元。
+  systemd.services.venus-usb-keepalive.enable = lib.mkForce false;
+  systemd.services."serial-getty@ttyGS0".enable = lib.mkForce false;
+
   networking.usePredictableInterfaceNames = false;
   networking.wireless = {
     enable = true;

@@ -1103,7 +1103,6 @@ CONFIG_MEMFD_CREATE=y
 CONFIG_SECRETMEM=y
 # CONFIG_ANON_VMA_NAME is not set
 # CONFIG_USERFAULTFD is not set
-# CONFIG_LRU_GEN is not set
 CONFIG_ARCH_SUPPORTS_PER_VMA_LOCK=y
 CONFIG_PER_VMA_LOCK=y
 CONFIG_LOCK_MM_AND_FIND_VMA=y
@@ -8809,3 +8808,9 @@ CONFIG_DM_VERITY=m
 CONFIG_DM_INTEGRITY=m
 CONFIG_CRYPTO_LZ4HC=m
 CONFIG_LZ4HC_COMPRESS=m
+
+# ==== MGLRU（多代 LRU）：Android 14 (5.15/6.1+) 默认启用，Google 报告 Android 上
+# OOM kill 减少 18%、应用启动更快、kswapd CPU 更低；Pixel 8 起在手机内核默认开。
+# 它可在运行期通过 /sys/kernel/mm/lru_gen/enabled 关闭，所以先开再测是安全的。
+CONFIG_LRU_GEN=y
+CONFIG_LRU_GEN_ENABLED=y

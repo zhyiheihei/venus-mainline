@@ -105,6 +105,35 @@ in
     ];
   };
   security.sudo.wheelNeedsPassword = false;
+
+  # 内存/回收调优：这一组与 nixos-config 的 minimal-components/kernel.nix 里
+  # `kernel.sysctl` 给所有 fleet 主机的一致（standalone 之前一个都没设，全是内核默认）。
+  # 依据（ArchWiki zram 与 Pop!_OS 的取值，也是内核文档对"内存内 swap"的建议）：
+  #   - 无盘 swap 可用时 swappiness 应显著高于 60（文档给 133~200 的推导）
+  #   - page-cluster 默认 3 = 一次预读 8 页；zram 没有寻道开销，预读只会白解压，设 0
+  #   - watermark_boost_factor=0 避免突发 reclaim 抖动；watermark_scale_factor=125 让 kswapd 早介入
+  # 内存/回收调优 + 与 fleet 一致的加固项（仅 standalone；fleet 有自己的那份）。
+  # 两个实测到的坑：
+  #  1) 整块 `boot.kernel.sysctl = lib.mkDefault { … }` 在这个 submodule 上会被整块吞掉
+  #     （求值后一个键都不出现）→ 必须逐键赋值。
+  #  2) 每个 key 是 unique-merge，nixpkgs 已定义的键（如 kernel.kptr_restrict）不能再定义一次，
+  #     否则报 "defined multiple times" → 只写 nixpkgs 没定义的键。
+  # 只在非 fleet 构建生效：fleet 的 minimal-components/kernel.nix 已统一给了这一组，
+  # 判据是 fleet 才引入定义 `options.lantian` 的模块。
+  boot.kernel.sysctl = lib.mkMerge [
+    (lib.mkIf (!(options ? lantian)) {
+      "vm.swappiness" = lib.mkDefault 180;
+      "vm.page-cluster" = lib.mkDefault 0;
+      "vm.watermark_boost_factor" = lib.mkDefault 0;
+      "vm.watermark_scale_factor" = lib.mkDefault 125;
+      "vm.oom_kill_allocating_task" = lib.mkDefault 1;
+      "kernel.dmesg_restrict" = lib.mkDefault 1;
+      "kernel.yama.ptrace_scope" = lib.mkDefault 1;
+      "kernel.kexec_load_disabled" = lib.mkDefault 1;
+      "kernel.nmi_watchdog" = lib.mkDefault 0;
+    })
+  ];
+
   # `services.journald.settings` 在 26.11 必然存在，原来那套
   # `lib.optionalAttrs (options ? services.journald.settings)` 双分支只剩死代码，
   # 只保留新写法。mkDefault：fleet 侧（nixos-config 的 journald 组件）统一 1G/100M，

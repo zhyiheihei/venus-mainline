@@ -326,3 +326,38 @@ full preempt）、LTO（收益 1~3%，构建代价大）、x86 专属与驱动�
 大分区 `fastboot flash userdata` 成功后，**不要立刻在同一块 UFS 的另一个 LUN 上 flash**：
 `Writing 'boot_b'`/`'boot_a'` 会挂死到超时，并把设备留在僵死的 `????????????` fastboot（需人工重启）。
 正确顺序：小的先（boot_a/b），每步之间留 15~40 秒让 UFS flush，最后再刷大分区。
+
+## v1.0（2026-11-19 22:20）—— 正式版定版
+
+**闭包** `hhaprh9rsw4jdxbhfny3nkrag67czirk-nixos-system-venus-26.11.20260914.efe6f07`
+**boot.img** `b9c62ecc9e0bdd2dc49e88c5504178b5`（45973504 字节）
+`boot_a` 与 `boot_b` 同镜像（读回 md5 一致），`dtbo_a`/`dtbo_b` 全零。
+
+v1.0 = M3（WiFi/串口/26.11）+ M4（fleet 布局、调试/正式拆分）+ M5（234.24G 满盘、A/B 双槽、
+zram zstd）+ 本版的内存与回收调优。
+
+**本版新增（内存）**：
+| 项 | 值 | 依据 |
+|---|---|---|
+| `CONFIG_LRU_GEN` + `LRU_GEN_ENABLED` | 开（`/sys/kernel/mm/lru_gen/enabled` = `0x0003`） | Google 报告 Android 上 OOM kill -18%、启动更快、kswapd CPU 更低；Android 14 GKI 默认开。LSFMM 2026 也记录了它在 Android 上的副作用，故保留运行期开关 |
+| `vm.swappiness` | 180 | 内核文档：内存内 swap 可远超 60；ArchWiki/Pop!\_OS 取值 |
+| `vm.page-cluster` | 0 | zram 无寻道，预读只会白解压（默认 3 = 一次 8 页） |
+| `vm.watermark_scale_factor` / `watermark_boost_factor` | 125 / 0 | 同上，避免突发 reclaim 抖动 |
+| `kernel.dmesg_restrict` / `yama.ptrace_scope` / `kexec_load_disabled` / `nmi_watchdog` / `oom_kill_allocating_task` | 1 / 1 / 1 / 0 / 1 | 与 fleet 各主机一致 |
+| THP | `always → madvise` | Android/Google 的默认；`always` 会让 khugepaged 撑大 RSS 并制造延迟尖刺 |
+
+**物理内存结论（回答"还能不能要更多"）**：`MemTotal` = 10.84 GiB，内核看到 11.86 GiB，
+差 1.04 GiB 全是 `reserved-memory`（DT 合计 697 MiB：`0x8f000000` 256M、`0xd8800000` 160M、
+`0x80c00000` 70M…）+ CMA 32 MiB，都是 TZ/hyp/ADSP/modem/splash 的固件自留区。
+唯一名义可回收的是 `cont_splash`/`framebuffer` 的 35 MiB（0.3%），按"早期启动不碰显示"的红线不动。
+结论：物理内存没有可捡的，能提升的是"可用量"（zram 有效容量 + 回收策略）。
+
+**实测（本机，闭包 hhaprh9r）**：`swappiness=180 page-cluster=0 wsf=125 wbf=0`、
+`dmesg_restrict=1 yama=1`、`MGLRU enabled=0x0003`、`THP=always [madvise] never`、
+`zram zstd 10.8G`、`wlan0 UP 192.168.0.68/24`、`systemctl --failed` = 0。
+
+### 两个求值坑（写下来免得再踩）
+1. `boot.kernel.sysctl = lib.mkDefault { … };` **整块会被吞掉**（求值后一个键都不出现），必须逐键写。
+2. sysctl 每个 key 是 unique-merge，nixpkgs 已经 `mkDefault` 定义过的键（如 `kernel.kptr_restrict`）
+   不能再定义一次，否则 `error: The option … is defined multiple times`。
+   逐键 + 只在非 fleet 构建生效（`options ? lantian` 取反），避免与 fleet 的 kernel.nix 撞车。

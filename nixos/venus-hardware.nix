@@ -177,7 +177,10 @@ in
   # or directory"）。内核其实有 CONFIG_RFKILL=y（kernel-config:1645），开机后
   # /sys/class/rfkill/rfkill0 与 /dev/rfkill(10:242) 都由 udev 建出来；这条 tmpfiles 规则
   # 只是给"udev 还没建好就先起 wpa_supplicant"的窗口兜底（同 major/minor，不冲突）。
+  # THP 默认是 always；手机上（Android/Google 的做法）是 madvise，避免 khugepaged
+  # 把 RSS 撑大、以及在内存紧张时产生延迟尖刺。运行期可随时改回。
   systemd.tmpfiles.rules = [
+    "w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise"
     "c /dev/rfkill 0600 root root 10 242 - -"
     "d /nix/persistent 0755 root root -"
   ];

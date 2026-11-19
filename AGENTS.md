@@ -69,8 +69,8 @@
 | Windows 侧 USB（fastboot / 18D1 / COM） | `tools/win-probe.sh` |
 | fastboot（内置超时，无设备返回 3） | `tools/win-fastboot.sh devices` / `"flash boot_b C:/…"` |
 | 从闭包组装 boot.img（cmdline 唯一来源） | `tools/boot-img.sh <closure> <out.img> [--dtb <dtb>]` |
-| 部署（推闭包 + 切 profile + 可选写 boot_b + 重启） | `tools/deploy.sh <closure> [--boot-img <img>] [--no-reboot]` |
-| 取回完整日志 | `tools/fetch-logs.sh [目录]` |
+| 部署（推闭包 + 可选 dd 写 boot_b 并读回校验 + 切 profile/GC 根 + 重启，全程 SSH 不碰 fastboot） | `tools/deploy.sh <closure> [--boot-img <img>\|--build-boot-img] [--no-reboot]` |
+| 取回完整日志（rsync 设备 `/nix/persistent`，含 initrd/stage-2/diag 三份） | `tools/fetch-logs.sh [目录]` |
 | 经 Windows COM 口给设备发命令（`MI11_WAIT=秒` 可等端口枚举） | `tools/serial.sh "<命令>" [秒]` / `--read` |
 | 从闭包做 btrfs userdata 镜像（sparse，可直接 flash） | `tools/mkbtrfs-img.sh <closure> <out.simg> [--hostkey <file>]` |
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ⚠️ 历史脚本（25.05 / 脚本式 initrd 时代）：注入 /venus-preinit.sh 的路线。
+#    M3 之后一律用 tools/boot-img.sh 从闭包组装 boot.img（cmdline 唯一来源，含 root=fstab）。
+#    保留仅为翻阅历史，不要用它生成要刷的镜像。
+
 set -euo pipefail
 out=${1:?'usage: make-bootimg.sh <out.img> [extra cmdline...]'}
 shift || true

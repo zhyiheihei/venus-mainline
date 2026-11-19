@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-# 刷写前闸门：把"一次只改一个变量"和"initrd/rootfs 必须自洽"变成机器检查。
-#
-# 用法: tools/preflight-flash.sh <boot.img> [rootfs 解包目录]
-#   基线:      BASE=~/.cache/venus-backups/known-good.md5
-#   允许换内核: ALLOW_KERNEL_CHANGE=1
-#   允许换 DTB: ALLOW_DTB_CHANGE=1
-#   默认 rootfs 目录: ~/.cache/venus-install/root
-#
-# 退出码非 0 = 禁止刷写。
+# ⚠️ 历史脚本（刷机时代的闸门检查）。M3 之后部署走 tools/deploy.sh（SSH + dd），
+#    只有重做 userdata 镜像时才需要 fastboot。这个脚本里的 baseline / 刷写计划
+#    （set_active b、dtbo-zero 等）已与新流程脱节，用之前先按 docs/HANDOFF.md 复核。
+
 set -euo pipefail
 
 img=${1:?'用法: preflight-flash.sh <boot.img> [rootfs 目录]'}

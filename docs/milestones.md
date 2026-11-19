@@ -179,3 +179,75 @@ ssh root@192.168.0.68 'systemctl reboot'
   `systemctl list-unit-files | grep -c wpa_supplicant-wlan0` = 0、
   `udc=configured` + `/dev/ttyGS0` 存在、`MHI_CB_EE_RDDM` = 0、`wpa_supplicant.service` active
 - `/nix/persistent/boot-milestone.img` 与该闭包 `.closure` 已同步为这一版（先验收后更新）
+
+---
+
+# M4 — fleet 版跑通（nixos-config 的 `nixosConfigurations.venus` 在真机上起来）
+
+**日期**：2026-11-19 17:24
+**闭包**：`i85wnar0syxm9azfs1cwzh5209s9arhq-nixos-system-venus-26.11pre1122823.04906337b6d5`
+**boot.img md5**：`b2577c4663c858eebae3c1da5b3ee217`（40116224 字节）
+**DTB md5**：`527c521e5fb792c27608dbfc820f864b`
+**构建命令**（在 `nixos-config` 里，用本地两个仓覆盖远端）：
+
+```sh
+nix build .#nixosConfigurations.venus.config.system.build.toplevel \
+  --override-input venus-mainline path:../venus-mainline \
+  --override-input secrets path:../nixos-secrets
+```
+
+## 定义
+
+`nixos-config` 里的 fleet 角色（`hosts/venus`，index 113、`home-lan` interconnect
+`192.168.0.68`、zerotier `447c5027d6`、`server` tag、`firewalled = true`）能在这台手机上
+完整跑起来：LT interconnect、zerotier、powerdns/coredns、wgmesh 全部就位，WiFi 由 sops 提供口令。
+
+## 冷启动实测（17:24 刷入后重启）
+
+| 判据 | 实测 |
+|---|---|
+| booted | `i85wnar0syxm…-26.11pre1122823.04906337b6d5` |
+| `/` | `tmpfs rw,nosuid,nodev,relatime,size=9098648k,mode=755` |
+| `/nix` | `/dev/sda34 btrfs rw,…,compress-force=zstd:3,ssd,discard=async,space_cache=v2,autodefrag,subvolid=5`；`225G 5.2G 219G 3%` |
+| WiFi | `wlan0 UP 192.168.0.68/24`；SSID `moli-1004-backup`、freq 5300.0、signal -32 dBm、2401.9 MBit/s 160MHz HE-MCS11 NSS2 |
+| sops | `sops-install-secrets` **active**，`/run/secrets -> /run/secrets.d/1` |
+| WiFi 单元 | `wpa_supplicant-wlan0.service` active |
+| LT / zerotier | `zttalxbxtu 198.18.0.113/24`；`zerotier-cli info` → `200 info 2991e03d81 1.16.0 ONLINE` |
+| ath11k | `MHI_CB_EE_RDDM` 0；`qcom-pcie` 17 行；`wmi command` 超时 0 次 |
+| SSH | **端口 2222**（fleet 约定，不是 22） |
+| failed units | `knot.service`、`nginx.service` —— 都因为 `/nix/sync-servers/{ltnet-zones,acme}` 不存在（fleet 侧 sync-servers 内容，非本移植问题） |
+| 串口 | `udc` = `not attached`（fleet 关掉了 `venus-usb-keepalive`；initrd 里的 gadget 在这一版没绑上，见"遗留"） |
+
+## 关键改动（三处，缺一不可）
+
+1. **secrets 身份对齐**（`nixos-config/hosts/venus/host.nix` + `nixos-secrets/.sops.yaml`）：
+   设备 host key 换成新机生成的那把（`age1wnuv9fam…`），9 个 venus 实际用到的 yaml 跑
+   `sops updatekeys`。之前设备是"重装后新 key"，而 `.sops.yaml` 里还是旧的
+   `age1qxazsz5…`，于是 `sops-install-secrets` 报
+   `Error getting data key: 0 successful groups required, got 0`，WiFi 完全没口令。
+2. **WiFi 单元必须放开 `/proc` 子集**：nixpkgs 的 wpa_supplicant 模板 + `lantian.harden`
+   默认档（mkOptionDefault，优先级低于模板）叠加后 `ProcSubset=pid`，该单元起 mount
+   namespace 时直接失败：
+   ```
+   wpa_supplicant-wlan0.service: Failed to set up mount namespacing:
+     /proc/sys/net: No such file or directory
+   Main process exited, code=exited, status=226/NAMESPACE
+   ```
+   `venus-fleet.nix` 里对该单元 `ProcSubset = mkForce "all"`、`ProtectProc = mkForce "default"`。
+3. **boot.img 的 cmdline 必须带板级三条**：fleet 闭包的 `kernel-params` 里没有
+   `regulator_ignore_unused pd_ignore_unused clk_ignore_unused`。缺它们时固件加载成功
+   （`fw_version 0x11008104` 正常），但 40 秒后
+   `ath11k_pci: wmi command 12291 timeout` / `failed to send WMI_SCAN_CHAN_LIST cmd`，
+   `wlan0` 永远 DOWN。`tools/boot-img.sh --from-kernel-params` 现在以闭包自带的
+   `kernel-params` 为底、去重并裁掉无关键（`vt.default_*` 等会把 512 字节主字段撑爆），
+   再补回这三条。
+
+## 遗留
+
+- **fleet 下串口不可用**：`udc = not attached`。fleet 角色故意关掉了 `venus-usb-keepalive`
+  （nixos-config 的 hardening 策略要求 gadget 服务带 hardening+confinement），而 initrd 里的
+  `venus-serial`（已改挂 `sysinit.target`）在这一版仍未把 gadget 绑上，日志也没有落盘
+  （落盘段落以 `/dev/ttyGS0` 存在为前提）。WiFi 通道已稳定，暂不阻塞；要恢复串口需要
+  在 `venus-fleet.nix` 里给 gadget 服务补 hardening 配置后重新启用 keepalive。
+- `knot.service` / `nginx.service` 需要 `/nix/sync-servers/*`，属于 fleet 侧的同步内容，
+  与本移植无关（同样在其它 fleet 主机上依赖同步任务）。

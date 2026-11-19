@@ -1,11 +1,16 @@
 # 交接文档（写给下一个接手的 agent）
 
-> **最新状态（2026-11-19，里程碑 M3）：NixOS 26.11 + fleet 文件系统布局 + WiFi + 串口全部跑通，
-> 冷启动验收通过。** 细节与判据见 `docs/milestones.md` 的 M3，实验过程见 `docs/experiments.md`。
+> **最新状态（2026-11-19 17:24，里程碑 M4）：fleet 版跑通** —— `nixos-config` 里的
+> `nixosConfigurations.venus`（index 113、LT interconnect、zerotier ONLINE）在真机上起来了，
+> WiFi 由 sops 提供口令，`/` = tmpfs、`/nix` = btrfs(225G)。细节见 `docs/milestones.md` 的 M4。
+> （M3 = 同一个 fleet 文件系统布局下的 standalone 版，仍可用作逃生镜像。）
 >
-> 闭包 `3rp120jslmjzwf7nr256wf19haadgjs2-nixos-system-venus-26.11.20260914.efe6f07`；
-> boot.img md5 `dad167af087c9d9cc5d59e97b033e324`（= `/nix/persistent/boot-milestone.img`）；
-> DTB md5 `527c521e5fb792c27608dbfc820f864b`。
+> **SSH 端口是 2222**（fleet 约定）：`ssh -p 2222 root@192.168.0.68`。
+>
+> 当前（M4，fleet）闭包 `i85wnar0syxm9azfs1cwzh5209s9arhq-nixos-system-venus-26.11pre1122823.04906337b6d5`；
+> boot.img md5 `b2577c4663c858eebae3c1da5b3ee217`（= `/nix/persistent/boot-milestone.img`）。
+> 逃生镜像（M3 standalone）：`/nix/persistent/boot-standalone-m3.img`，md5 `dad167af087c9d9cc5d59e97b033e324`。
+> DTB md5 `527c521e5fb792c27608dbfc820f864b`（两个版本同一份）。
 >
 > 置信度约定：✅ = 今天带命令实测过；🔶 = 推断或历史记录、用前请复验。
 
@@ -27,7 +32,7 @@
 **主通道：WiFi SSH**
 
 ```sh
-ssh root@192.168.0.68          # 公钥登录；PasswordAuthentication=no
+ssh -p 2222 root@192.168.0.68   # fleet 版 ssh 在 2222；standalone 版（M3 逃生镜像）在 22
 ```
 
 **备用通道：USB ACM 串口（Windows COM3）**
@@ -48,6 +53,20 @@ MI11_WAIT=200 tools/serial.sh --read 260  # 端口还没枚举时先等（boot �
 `/nix/persistent/venus-diag.log`。故障时让用户拍照即可。
 
 ## 三、部署（首选：完全不碰 fastboot）
+
+**fleet 版的构建**（在 `nixos-config` 里，用本地两个仓覆盖远端）：
+
+```sh
+cd ~/Documents/nixos/nixos-config
+nix build .#nixosConfigurations.venus.config.system.build.toplevel \
+  --override-input venus-mainline path:../venus-mainline \
+  --override-input secrets path:../nixos-secrets
+```
+
+fleet 闭包的 boot.img **必须**用 `tools/boot-img.sh <closure> <out.img> --from-kernel-params`：
+fleet 的 `kernel-params` 缺 `regulator_ignore_unused pd_ignore_unused clk_ignore_unused`
+（缺了 WiFi 固件 40 秒后 WMI 超时、wlan0 永远 DOWN），而它又自带一堆 standalone 没有的参数
+（`audit=1`、`lsm=landlock,yama,bpf`、`log_buf_len`…），所以不能直接套 standalone 的 cmdline。
 
 设备跑起来后：
 

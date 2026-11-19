@@ -272,3 +272,57 @@ nix build .#nixosConfigurations.venus.config.system.build.toplevel \
   在 `venus-fleet.nix` 里给 gadget 服务补 hardening 配置后重新启用 keepalive。
 - `knot.service` / `nginx.service` 需要 `/nix/sync-servers/*`，属于 fleet 侧的同步内容，
   与本移植无关（同样在其它 fleet 主机上依赖同步任务）。
+
+## M5（2026-11-19 21:50）：单槽单系统 → 234.24G 满盘 + A/B 双槽 + 内核对齐 x86 主机
+
+**闭包** `y7qa61hf7vnizzrr1aick1lkp63mk8y0-nixos-system-venus-26.11.20260914.efe6f07`
+**boot.img** `b88768186beb06eb924695ff7e9123d1`（45912064 字节，= `/nix/persistent/boot-milestone.img`）
+同时写入 **boot_a 与 boot_b**（读回 md5 一致），dtbo_a/dtbo_b 均为 24MB 全零（`77377273…`）。
+
+### 存储扩容（不再需要第二个系统）
+- 删掉 Android 侧大分区：`cust`(1G)、`super`(8.5G)、`vbmeta_system_a/b`、`bk010`、`rescue`，
+  把 `userdata` 从 LBA 2785280 前移到 253952，终点不变 → **224.6 GiB → 234.24 GiB**。
+- 盘上 GPT 直接验证（`dd` 读 entries，绕过内核）：只剩 `exaid`/`persist`/`userdata` 等，`cust`/`super`/`rescue` 已不在。
+- 原始表备份：`~/venus-backup/2026-11-19/table.dump`（`sfdisk /dev/sda < table.dump` 可整体还原）。
+- 结果：`df -h /nix` = **235G 总 / 229G 可用**，`btrfs Device size 234.24GiB`。
+
+### A/B 双槽（关键：不用 fastboot 就能冗余）
+- `boot_a` = `boot_b` = 同一 boot.img，`dtbo_a` = `dtbo_b` = 全零。
+- 全部通过 **SSH + dd** 完成（ABL 接受 dd 写入的 boot，deadman 一直这么干）：
+  `dd if=/nix/persistent/boot-milestone.img of=/dev/disk/by-partlabel/boot_a bs=1M conv=fsync`
+  然后 `head -c <size> /dev/disk/by-partlabel/boot_a | md5sum` 读回校验。
+- 意义：b 槽起不来时 ABL 的失败计数会回落到 a 槽，不再需要人工按电源键进 fastboot。
+
+### 内核：与 fleet x86 主机（cachyos/LTO）配置审计后的对齐
+参考物 = x86 主机实际用的 `/nix/store/bknvzyp6j…-linux-config-7.3.4`（11409 符号）与我们的
+`nixos/kernel-config`（7126 符号）逐符号对比，并且**每条都在设备 `zcat /proc/config.gz` 上确认过缺失**：
+- zram 后端整组（`ZRAM_BACKEND_{842,DEFLATE,LZ4,LZ4HC,LZO,ZSTD}`、`ZRAM_DEF_COMP_ZSTD`、
+  `ZRAM_WRITEBACK`、`ZRAM_MULTI_COMP`、`ZSWAP`、`ZSWAP_COMPRESSOR_DEFAULT_ZSTD`）
+- LSM：`SECURITY_YAMA`、`SECURITY_LANDLOCK`、`SECURITY_LOCKDOWN_LSM`、`SECURITY_DMESG_RESTRICT`
+- 加固/工具：`SLAB_FREELIST_HARDENED`、`NETLABEL`、`CGROUP_NET_PRIO`、`USERFAULTFD`
+- 文件系统：`BTRFS_FS_POSIX_ACL`、`SQUASHFS_XZ`、`NFS_FS`、`CIFS`、`EXFAT_FS`、`NTFS3_FS`、`ISO9660_FS`
+- 块层：`DM_CRYPT`、`DM_VERITY`、`DM_INTEGRITY`、`CRYPTO_LZ4HC`、`LZ4HC_COMPRESS`
+故意不抄的：`HZ=1000`（桌面取向，手机会多 750 次/秒定时器中断）、`PREEMPT_DYNAMIC`（我们已是
+full preempt）、LTO（收益 1~3%，构建代价大）、x86 专属与驱动类 7000+ 符号。
+`sched_ext`（`SCHED_CLASS_EXT`）有价值但按计划延后，先拿干净基线。
+
+**实测（本机，闭包 y7qa61hf）**：
+| 判据 | 结果 |
+|---|---|
+| zram | `/dev/zram0 zstd 10.8G`，`comp_algorithm` = `lzo-rle lzo lz4 lz4hc [zstd] deflate 842`（之前只有 `lzo`，5.42G） |
+| LSM | `/sys/kernel/security/lsm` = `capability,landlock,yama`（之前只有 `capability`）；`yama/ptrace_scope`=1 存在 |
+| ACL | `/nix` 上 `setfacl` 生效（`user:venus:rw-`），btrfs 挂载含 `acl` |
+| 容量 | `df -h /nix` = 235G 总 / 229G 可用 |
+| WiFi / failed | `wlan0 UP 192.168.0.68/24`；`systemctl --failed` = 0 |
+
+### 顺带修掉的两个真 bug
+1. **`venus-serial` ordering cycle**：`wantedBy=[sysinit.target]` 与 `before=[sysinit.target]` 同指一个
+   target → systemd 删任务 → initrd 从未建 gadget（fleet 每次 `udc=not attached` 的根因）。
+   去掉 `before` 后，串口在 stage-2 可用（本次通过串口取到 `id`/`uname` 即证据）。
+2. **initrd 免密 shell 改为按 cmdline 开关** `venus.shell=1`（`tools/boot-img.sh --shell`），
+   不再绑定 debug 内核。
+
+### 一条操作教训（写进流程）
+大分区 `fastboot flash userdata` 成功后，**不要立刻在同一块 UFS 的另一个 LUN 上 flash**：
+`Writing 'boot_b'`/`'boot_a'` 会挂死到超时，并把设备留在僵死的 `????????????` fastboot（需人工重启）。
+正确顺序：小的先（boot_a/b），每步之间留 15~40 秒让 UFS flush，最后再刷大分区。

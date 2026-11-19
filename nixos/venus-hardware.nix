@@ -402,7 +402,11 @@ in
     # 放到 sysinit.target（更早、且不参与那套 replace-irreversibly），保证无论后面
     # 怎么失败，串口和 initrd 落盘都已经就位。
     wantedBy = [ "sysinit.target" ];
-    before = [ "sysinit.target" ];
+    # 不能再写 `before = [ "sysinit.target" ]`：wantedBy 与 before 同时指向同一个 target
+    # 会构成 ordering cycle，systemd 会直接把本单元的任务删掉（实测 journal：
+    #   sysinit.target: Found ordering cycle: venus-serial.service/start after sysinit.target/start
+    #   sysinit.target: Job venus-serial.service/start deleted to break ordering cycle
+    # ）→ initrd 里根本没建 gadget，于是 fleet 版每次都是 udc=not attached、COM3 从不出现。
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -421,12 +425,11 @@ in
         sleep 1
         n=$((n + 1))
       done
-      ${lib.optionalString venusDebug ''
-      # 调试版：switch-root 之前就给人一个 root shell（正式版没有，避免 initrd 里的免登录面）
-      if [ -c /dev/ttyGS0 ]; then
+      # initrd 里的 root shell 只在 cmdline 带 `venus.shell=1` 时给（不必换 debug 内核，
+      # 平时正式版 cmdline 没有这个参数，就没有免登录面）。tools/boot-img.sh 可加 --shell 生成。
+      if [ -c /dev/ttyGS0 ] && grep -qw venus.shell=1 /proc/cmdline; then
         ( setsid sh </dev/ttyGS0 >/dev/ttyGS0 2>&1 & ) || true
       fi
-      ''}
       # 关键取证：无论后面 stage-2 是否起得来，都把 initrd 阶段的证据落到 /nix/persistent，
       # 这样即使整机黑屏（无串口、无 WiFi），下次启动别的镜像也能读到这次失败现场。
       # 绝不在 initrd 里自己挂 rootfs：switch-root 前遗留多余挂载是切换失败的已知来源。
@@ -800,6 +803,16 @@ in
   systemd.targets.hibernate.enable = false;
   systemd.targets.hybrid-sleep.enable = false;
   systemd.targets.suspend-then-hibernate.enable = false;
+
+  # zram：fleet 的 hardening 组件给的是 memoryPercent = 50 / algorithm = zstd。
+  # 这里只把比例提到 100（对齐 fleet 里 hosts/google 的做法），算法保持 fleet 的 zstd；
+  # zstd 后端要靠 nixos/kernel-config 里的 CONFIG_ZRAM_BACKEND_ZSTD，否则会被降级成 lzo-rle。
+  # 与 fleet 的 hardening 组件一致：没有磁盘 swap 时就启用 zram。standalone 之前
+  # zramSwap.enable 是默认 false，所以设备上连 /sys/block/zram0 都不存在（实测无输出），
+  # 内核里那些 zstd 后端等于白开。
+  zramSwap.enable = lib.mkDefault (config.swapDevices == [ ]);
+  zramSwap.algorithm = lib.mkDefault "zstd";
+  zramSwap.memoryPercent = lib.mkDefault 100;
 
   # `services.logind.settings` 在 26.11 必然存在，原来的 `options ?` 双分支只剩死代码。
   services.logind.settings.Login = {

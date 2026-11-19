@@ -7,8 +7,11 @@
 >
 > **SSH 端口是 2222**（fleet 约定）：`ssh -p 2222 root@192.168.0.68`。
 >
-> 当前（M4，fleet）闭包 `zybiwskqdb06xx8my3y67700yc1c0pw8-nixos-system-venus-26.11pre1122823.04906337b6d5`；
-> boot.img md5 `9f9387fdb8cc34d75cb005acf8943de8`（= `/nix/persistent/boot-milestone.img`）。
+> 当前（M5）闭包 `y7qa61hf7vnizzrr1aick1lkp63mk8y0-nixos-system-venus-26.11.20260914.efe6f07`；
+> boot.img md5 `b88768186beb06eb924695ff7e9123d1`（= `/nix/persistent/boot-milestone.img`），
+> **boot_a 与 boot_b 都写了同一镜像**，dtbo_a/dtbo_b 均为 24MB 全零 —— 单系统但有 A/B 冗余。
+> 存储已扩到整盘：`userdata` = 234.24 GiB（删掉 Android 的 cust/super/vbmeta_system_*/bk010/rescue），
+> `/nix` 235G 总 / 229G 可用。zram 现在是 **zstd 10.8G**（此前被静默降级成 lzo-rle 5.42G）。
 >
 > **调试版 vs 正式版**：`venus.debug.enable` 现在是唯一的开关（`lib.mkDefault false`）。
 > 调试版 = `nixosConfigurations.venus-debug`（带 debug 内核 + 全部诊断单元 + 串口 root 免密 +

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 从 NixOS 闭包组装 boot.img（内核 / DTB / initrd / cmdline 全部取自同一闭包）
-# 用法: boot-img.sh <closure> <out.img> [--dtb <dtb 文件>] [--init <init 路径>] [--from-kernel-params]
+# 用法: boot-img.sh <closure> <out.img> [--dtb <dtb 文件>] [--init <init 路径>] [--from-kernel-params] [--shell]
 # --init: 覆盖 cmdline 里的 init=，用于只换 initrd 而 stage-2 仍用设备上已有闭包的场景
 # --from-kernel-params: cmdline 以闭包自带的 kernel-params 为底（fleet 闭包必须用这个，
 #   否则会丢掉 audit=1 / lsm= / log_buf_len 等 fleet 侧要求的参数）
@@ -11,11 +11,13 @@ shift 2
 dtb=""
 init_path=""
 from_kp=0
+shell_req=0
 while [ $# -gt 0 ]; do
   case $1 in
     --dtb) dtb=$2; shift 2;;
     --init) init_path=$2; shift 2;;
     --from-kernel-params) from_kp=1; shift;;
+    --shell) shell_req=1; shift;;
     *) echo "unknown arg $1" >&2; exit 1;;
   esac
 done
@@ -66,6 +68,10 @@ if [ "$from_kp" = 1 ] && [ -f "$closure/kernel-params" ]; then
 else
   cmdline="console=ttyGS0,115200 console=tty0 loglevel=7 consoleblank=0 root=fstab init=$init_path firmware_class.path=/run/current-system/firmware regulator_ignore_unused pd_ignore_unused clk_ignore_unused net.ifnames=0"
 fi
+
+# --shell：给 initrd 一个诊断用 root shell（nixos/venus-hardware.nix 里按 cmdline 判断）
+[ "$shell_req" = 1 ] && cmdline="$cmdline venus.shell=1"
+echo "cmdline=$cmdline"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/venus-bootimg.XXXXXX")
 trap 'rm -rf "$work"' EXIT

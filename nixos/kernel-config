@@ -2158,6 +2158,22 @@ CONFIG_BLK_DEV=y
 # CONFIG_BLK_DEV_NULL_BLK is not set
 # CONFIG_BLK_DEV_PCIESSD_MTIP32XX is not set
 CONFIG_ZRAM=m
+# 7.x 把 zram 的压缩后端拆成独立 config 符号（drivers/block/zram/Kconfig:17-53）。
+# 只开 CONFIG_ZRAM 时后端只剩默认的 lzo，`comp_algorithm` 里根本没有 zstd，
+# 于是 zram-generator 的 `compression-algorithm=zstd` 被静默降级成 lzo-rle
+# （2026-11-19 设备实测：/sys/block/zram0/comp_algorithm = "[lzo-rle] lzo"）。
+# 下面这一组与 nixpkgs 给 x86 内核的 common-config.nix:1079-1091 一致。
+CONFIG_ZRAM_WRITEBACK=y
+CONFIG_ZRAM_MULTI_COMP=y
+CONFIG_ZRAM_BACKEND_842=y
+CONFIG_ZRAM_BACKEND_DEFLATE=y
+CONFIG_ZRAM_BACKEND_LZ4=y
+CONFIG_ZRAM_BACKEND_LZ4HC=y
+CONFIG_ZRAM_BACKEND_LZO=y
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
+CONFIG_ZSWAP=y
+CONFIG_ZSWAP_COMPRESSOR_DEFAULT_ZSTD=y
 CONFIG_BLK_DEV_LOOP=y
 CONFIG_BLK_DEV_LOOP_MIN_COUNT=8
 # CONFIG_BLK_DEV_DRBD is not set
@@ -8756,3 +8772,40 @@ CONFIG_CRYPTO_POLY1305=y
 CONFIG_CRYPTO_LIB_CHACHA20POLY1305=y
 CONFIG_CRYPTO_LIB_CURVE25519=y
 CONFIG_CRYPTO_LIB_POLY1305=y
+
+# ==== fleet x86 host alignment (audited 2026--11-19) ====
+# Evidence: each symbol below was confirmed "not set" on the device with
+#   ssh -p 2222 root@192.168.0.68 'zcat /proc/config.gz | grep <SYM>'
+# and is enabled in the reference config used by the x86 hosts
+#   (nixpkgs common-config.nix:1079-1091 for lantianLinuxCachyOS, config
+#    /nix/store/bknvzyp6jw63r60jpvb3dymb68iyv4bd-linux-config-7.3.4).
+# LSM: cmdline carries lsm=landlock,yama,bpf but /sys/kernel/security/lsm
+# only showed "capability", and fleet's kernel.sysctl writes
+# kernel.yama.ptrace_scope which does not exist without YAMA.
+CONFIG_SECURITY_YAMA=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+CONFIG_SECURITY_DMESG_RESTRICT=y
+# hardening parity with x86 hosts
+CONFIG_SLAB_FREELIST_HARDENED=y
+# container / network tooling
+CONFIG_NETLABEL=y
+CONFIG_CGROUP_NET_PRIO=y
+# user-space page fault handling (JVM, CRIU, some runtimes)
+CONFIG_USERFAULTFD=y
+# /nix is btrfs and POSIX ACL was off: fleet tmpfiles/impermanence may use ACLs
+CONFIG_BTRFS_FS_POSIX_ACL=y
+# compressed read-only images
+CONFIG_SQUASHFS_XZ=y
+# network filesystems and USB stick formats (fleet has nfs/cifs mounts)
+CONFIG_NFS_FS=m
+CONFIG_CIFS=m
+CONFIG_EXFAT_FS=m
+CONFIG_NTFS3_FS=m
+CONFIG_ISO9660_FS=m
+# block-layer crypto/verity parity (modules, no resident cost)
+CONFIG_DM_CRYPT=m
+CONFIG_DM_VERITY=m
+CONFIG_DM_INTEGRITY=m
+CONFIG_CRYPTO_LZ4HC=m
+CONFIG_LZ4HC_COMPRESS=m

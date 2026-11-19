@@ -268,3 +268,36 @@ early boot（`/nix/persistent` 零写入、无串口、无网，只能人工进 
   `CONFIG_MTD_OOPS`（不是 `MTD_MTDOOPS`）。
 - 求值必须零 warning：`nix eval .#nixosConfigurations.venus.config.system.build.toplevel.drvPath`
   不该出现 `evaluation warning: Obsolete option`。
+
+## 16. 存储与槽位（M5 之后）
+
+- **只有一个系统，但有两个可引导槽**：`boot_a` 与 `boot_b` 都写同一份 boot.img，
+  `dtbo_a`/`dtbo_b` 都是 24MB 全零。b 槽起不来时 ABL 的失败计数会回落到 a 槽 —— 不必人工按键。
+- 写槽位**不需要 fastboot**：`dd if=/nix/persistent/boot-milestone.img of=/dev/disk/by-partlabel/boot_a bs=1M conv=fsync`
+  后必须 `head -c <size> /dev/disk/by-partlabel/boot_a | md5sum` 读回校验（ABL 接受 dd 写入的 boot）。
+- 分区表：Android 侧 `cust`/`super`/`vbmeta_system_a,b`/`bk010`/`rescue` 已删除，`userdata` 吃掉整盘
+  剩余空间（234.24 GiB）。原始表备份在 `~/venus-backup/2026-11-19/table.dump`，可 `sfdisk /dev/sda <` 整体还原。
+  **不要再动分区表**；真要动，先备份 `sfdisk -d /dev/sda` 并确认 `getvar partition-size:userdata` 已生效。
+- 刷写顺序：**小的先**（boot_a/boot_b），每步之间留 15~40 秒让 UFS flush，最后才刷大分区（userdata）。
+  反过来会让 `Writing 'boot_*'` 挂死并把设备留在僵死的 `????????????` fastboot。
+
+## 17. 内核 config 与 x86 主机的对齐原则
+
+- 参考物是 x86 主机实际生效的 config：从 nixos-config 求 `.#nixosConfigurations.<x86 host>.config.boot.kernelPackages.kernel.configfile`
+  拿到，或用 `nix build --impure --expr 'with import <nixpkgs> {}; linux_latest.configfile'`。
+- **对齐前先在设备上 `zcat /proc/config.gz` 确认真的缺失**，不要只比 config 文件；
+  改完也要在设备上核对生成物，而不是只看源码。
+- 已知不要照抄的项：`HZ=1000`（桌面取向，手机功耗差）、`PREEMPT_DYNAMIC`（我们已是 full preempt）、
+  LTO（1~3% 收益、构建代价大）、`MODULE_SIG`（要配套密钥链）、以及 7000+ 驱动符号。
+- zram 在 7.x 需要 `CONFIG_ZRAM_BACKEND_ZSTD` 才算真开；`zramSwap.enable` 在 standalone 是默认 false，
+  要显式 `lib.mkDefault (config.swapDevices == [ ])`（与 fleet 的 hardening 组件一致）。
+
+## 18. 远程诊断通道（M5 之后）
+
+- standalone（`nixosConfigurations.venus`）：sshd 在 **22**；fleet（nixos-config）在 **2222**。
+  判断当前跑的是哪一个最省事的办法：`ssh -o ConnectTimeout=3 root@192.168.0.68 'readlink -f /run/booted-system'`。
+- 串口（Windows COM3）在 stage-2 也活着：`tools/serial.sh "<命令>"`。如果 `Open()` 报"拒绝访问"，
+  先 `taskkill /IM powershell.exe /F`（残留的 ser.ps1 会占着端口），再 `Get-CimInstance Win32_Process`
+  确认没有 `ser.ps1` 进程；实在不行拔插数据线。
+- 注意：**boot.img 里的 `init=` 是写死的**。切了 profile 但没重做 boot.img，设备仍会启动旧闭包
+  （实测：profile 指 y7qa61hf、booted 仍是 xi43x42l）。换闭包必须重生成 boot.img 并 dd 两个槽。

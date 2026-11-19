@@ -9,6 +9,18 @@ closure=${1:?'usage: mkbtrfs-img.sh <closure> <out.simg> [--size 8G] [--hostkey 
 out=${2:?'usage: mkbtrfs-img.sh <closure> <out.simg> [--size 8G] [--hostkey <file>]'}
 shift 2
 size=8G
+# 允许 "234.24G" 这类带小数的写法：truncate 只认整数，这里换算成字节
+to_bytes() {
+  python3 - "$1" <<'EOF'
+import sys,re
+v=sys.argv[1].strip().upper()
+m=re.fullmatch(r'([0-9.]+)([KMGT]?)I?B?', v)
+if not m: raise SystemExit(f'bad size: {v}')
+n=float(m.group(1)); u=m.group(2)
+mult={'':1,'K':1024,'M':1024**2,'G':1024**3,'T':1024**4}[u]
+print(int(n*mult))
+EOF
+}
 hostkey=""
 while [ $# -gt 0 ]; do
   case $1 in
@@ -33,7 +45,7 @@ cleanup() {
 trap cleanup EXIT
 
 rm -f "$raw"; rm -rf "$stage"; mkdir -p "$stage" "$mnt"
-truncate -s "$size" "$raw"
+truncate -s "$(to_bytes "$size")" "$raw"
 mkfs.btrfs -q -L NIXOS_NIX -f "$raw"
 
 sudo mount -o loop "$raw" "$mnt"

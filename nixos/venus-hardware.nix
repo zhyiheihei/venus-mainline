@@ -175,7 +175,9 @@ in
   #   "Main process exited, code=exited, status=226/NAMESPACE"
   # 这里补一个字符设备节点只为满足 bind mount（没有 rfkill 驱动，打开会 ENODEV，
   # wpa_supplicant 把它当“无 rfkill”处理，不影响连接）。
-  systemd.tmpfiles.rules = [ "c /dev/rfkill 0600 root root 10 242 - -" ];
+  systemd.tmpfiles.rules = [
+    "c /dev/rfkill 0600 root root 10 242 - -"
+  ];
 
   systemd.services."wpa_supplicant-wlan0" = lib.mkIf config.networking.wireless.enable {
     serviceConfig = {
@@ -403,7 +405,16 @@ in
       # 绝不在 initrd 里自己挂 rootfs：switch-root 前遗留多余挂载是切换失败的已知来源。
       # 落盘只在 sysroot 已挂好时做（它由 sysroot.mount 负责），否则放弃。
       VLOGDIR=/sysroot/persistent
-      [ -d "$VLOGDIR" ] || VLOGDIR=""
+      if [ ! -d "$VLOGDIR" ]; then
+        # fleet/impermanence 的根是 tmpfs，没有 /sysroot/persistent。把持久盘挂到独立的
+        # /vlog（不挂 /sysroot，避免遗留挂载挡住 switch-root），失败就放弃落盘。
+        mkdir -p /vlog
+        if mount -t ext4 /dev/disk/by-label/nixos /vlog 2>/dev/null; then
+          if [ -d /vlog/persistent ]; then VLOGDIR=/vlog/persistent; else VLOGDIR=/vlog; fi
+        else
+          VLOGDIR=""
+        fi
+      fi
       if [ -n "${VLOGDIR:-}" ] && [ -d "${VLOGDIR:-/nonexistent}" ]; then
         {
           echo "=== $(date '+%F %T') initrd dmesg ==="
@@ -512,6 +523,30 @@ in
   # 注意：不能 wantedBy = multi-user.target —— 带 sleep 的 oneshot 会把整个
   # multi-user.target 拖住（2026-11-17 16:09 实测：Startup finished 1min 44s，
   # WiFi/串口/keepalive 全部顺延，等于自杀）。改成 timer 触发。
+  # 首次启动把根 ext4 扩到整块分区（镜像 8G，分区 224G）；标记文件保证只做一次。
+  systemd.services.venus-grow-nix = {
+    description = "venus: 首次启动把 /nix 扩到整块分区";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "nix.mount" ];
+    requires = [ "nix.mount" ];
+    path = with pkgs; [ e2fsprogs util-linux coreutils ];
+    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    script = ''
+      [ -e /nix/persistent/.grow-done ] && exit 0
+      dev=$(findmnt --noheadings --output SOURCE --target /nix | sed 's/\[.*//')
+      [ -n "$dev" ] || exit 0
+      dev=$(readlink -f "$dev")
+      cur=$(blockdev --getsize64 "$dev")
+      part=$(cat /sys/class/block/$(basename "$dev")/size)
+      part_bytes=$((part * 512))
+      if [ "$part_bytes" -gt "$cur" ]; then
+        echo "grow /nix: $cur -> $part_bytes"
+        resize2fs "$dev" || exit 1
+      fi
+      touch /nix/persistent/.grow-done
+    '';
+  };
+
   systemd.services.venus-deadman = {
     description = "venus: 连续 3 次（每 90 秒）判定无网且无串口时回滚到里程碑镜像并重启";
     serviceConfig = { Type = "oneshot"; TimeoutStartSec = 400; };

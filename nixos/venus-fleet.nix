@@ -13,16 +13,17 @@ in
 {
   lantian.kernel = lib.mkForce (crossPkgs.callPackage ./kernel.nix { debug = config.venus.debug.enable; });
 
-  # fleet 用 impermanence：/ 在 tmpfs，只有 /nix 落盘，所以状态目录是 /nix/persistent，
-  # 而板级模块（deadman/bootdump/probe/usb-state）都写 /persistent。这里做一条符号链，
-  # 让两套布局共用同一批路径，不必改板级模块。
-  systemd.tmpfiles.rules = [ "L+ /persistent - - - - /nix/persistent" ];
-
+  # fleet 用 impermanence："/" 是 tmpfs，只有 /nix 落盘。board 侧不改这个约定
+  # （见 hosts/venus/hardware-configuration.nix：用 x-mount.subdir=nix 把同一块
+  # ext4 里的 nix/ 挂到 /nix，从而与 fleet 标准兼容）。
+  # 板级模块（deadman/bootdump/probe/usb-state）都写 /persistent，这里给一条
+  # 符号链指到持久化的 /nix/persistent。
   # fleet（server 角色）不需要 USB gadget：keepalive 是 Type=simple 的常驻循环，
   # 在 nixos-config 的 lantian.harden 策略里必须给 hardening+confinement，
   # 而这块板子只需要 WiFi + SSH，故直接关掉 USB gadget 相关单元。
   systemd.services.venus-usb-keepalive.enable = lib.mkForce false;
-  systemd.services."serial-getty@ttyGS0".enable = lib.mkForce false;
+  # 串口保留：fleet 里它是唯一在 WiFi 起不来时还能用的诊断通道（getty 是模板实例，
+  # nixos-config 的 hardening 策略对 @ 模板豁免）。
 
   networking.usePredictableInterfaceNames = false;
   networking.wireless = {
@@ -52,30 +53,19 @@ in
     };
   };
 
-  systemd.services.venus-boot-activate = {
-    description = "venus: boot-time NixOS activation";
-    wantedBy = [ "sysinit.target" ];
-    before = [
-      "sysinit.target"
-      "systemd-sysusers.service"
-      "systemd-tmpfiles-setup.service"
-      "getty.target"
-      "sshd.service"
-      "venus-wifi-power.service"
-    ];
-    unitConfig.DefaultDependencies = false;
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = "/nix/var/nix/profiles/system/activate";
-    };
-  };
+  # 删掉 venus-boot-activate：它是 25.05 时代为了让 fleet 的 /etc 生效而手写的
+  # "在 sysinit 前跑 activate"。现代 NixOS 的 stage-2 自己会跑 activate，
+  # 而这个单元 before=sysinit.target + DefaultDependencies=false，一旦 activate
+  # 因为 /nix 尚未就绪或 sops 未解密而阻塞，就会把整个启动卡住
+  # —— 2026-11-19 08:14 那次 fleet 冷启动黑屏（背光亮、无串口终端、无网络）高度符合这一形态。
 
   lantian.backup.enable = lib.mkForce false;
 
   boot.extraModulePackages = lib.mkForce [ ];
   boot.kernelModules = lib.mkForce [ ];
-  boot.initrd.kernelModules = lib.mkForce [
+  # mkAfter 而不是 mkForce：mkForce 会把 nixos-config 侧（minimal-components 与
+  # impermanence）配置的 initrd 模块整段替换掉，导致持久盘所需模块可能缺失。
+  boot.initrd.kernelModules = lib.mkAfter [
     "qcom-refgen-regulator"
     "cec"
     "drm_display_helper"

@@ -1,14 +1,31 @@
-# venus 的硬件描述（原文件由设备上的 nixos-generate-config 生成，只在设备上，
-# 不进 git；换机后按安装时的实际布局重建，内容与旧的一致：根 = userdata 上的 ext4）。
+# venus 的文件系统布局：与 nixos-config 里其它 fleet 主机（opi5p / nanopi-r5c）一致，
+# 不使用 ext4 —— "/" 是 tmpfs，"/nix" 是独立 btrfs（label NIXOS_NIX，根目录即 store），
+# 持久化数据在 /nix/persistent。
 { lib, ... }:
 {
-  # 根文件系统落在 sda34/userdata，装的时候用 mkfs.ext4 -L nixos 打标签
   fileSystems."/" = {
-    device = "/dev/disk/by-label/nixos";
-    fsType = "ext4";
-    options = [ "noatime" ];
+    device = "tmpfs";
+    fsType = "tmpfs";
+    options = [
+      "mode=755"
+      "nodev"
+      "nosuid"
+      "relatime"
+      "size=80%"
+    ];
   };
 
-  # 手机没有 swap，也不用 zram（内存够，避免额外变量）
+  fileSystems."/nix" = {
+    device = "/dev/disk/by-label/NIXOS_NIX";
+    fsType = "btrfs";
+    neededForBoot = true;
+    options = [
+      "compress-force=zstd"
+      "autodefrag"
+      "nosuid"
+      "nodev"
+    ];
+  };
+
   swapDevices = [ ];
 }

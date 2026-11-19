@@ -7,8 +7,13 @@
 >
 > **SSH 端口是 2222**（fleet 约定）：`ssh -p 2222 root@192.168.0.68`。
 >
-> 当前（M4，fleet）闭包 `i85wnar0syxm9azfs1cwzh5209s9arhq-nixos-system-venus-26.11pre1122823.04906337b6d5`；
-> boot.img md5 `b2577c4663c858eebae3c1da5b3ee217`（= `/nix/persistent/boot-milestone.img`）。
+> 当前（M4，fleet）闭包 `zybiwskqdb06xx8my3y67700yc1c0pw8-nixos-system-venus-26.11pre1122823.04906337b6d5`；
+> boot.img md5 `9f9387fdb8cc34d75cb005acf8943de8`（= `/nix/persistent/boot-milestone.img`）。
+>
+> **调试版 vs 正式版**：`venus.debug.enable` 现在是唯一的开关（`lib.mkDefault false`）。
+> 调试版 = `nixosConfigurations.venus-debug`（带 debug 内核 + 全部诊断单元 + 串口 root 免密 +
+> initrd 免密 shell + deadman 自动回滚）；正式版 = 普通设备（无周期诊断、无自动改引导）。
+> 无网无串口时要现场证据，就切到调试版构建。
 > 逃生镜像（M3 standalone）：`/nix/persistent/boot-standalone-m3.img`，md5 `dad167af087c9d9cc5d59e97b033e324`。
 > DTB md5 `527c521e5fb792c27608dbfc820f864b`（两个版本同一份）。
 >

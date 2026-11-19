@@ -228,3 +228,43 @@
   linux-firmware 只有 hw2.0/hw2.1）。内核产物一律不进 git。
 - `nixos/configuration.nix` 的 WiFi `psk` 只提交占位符，明文留在工作区。
 - 内核红线：不设 `CONFIG_INITRAMFS_SOURCE`（内嵌 initramfs 会遮住 nixpkgs 的 `/bin`）。
+
+## 14. 调试版 / 正式版（2026-11-19 起）
+
+只有一个开关：`venus.debug.enable`（`lib.mkDefault false`）。`nixosConfigurations.venus-debug`
+用 `mkForce` 打开它，并换 `debug = true` 的内核。
+
+| 只在调试版 | 两版都要 | 只在调试版（续） |
+|---|---|---|
+| `venus-console-diag` + timer（周期打 tty0、追加 `/nix/persistent/venus-diag.log`） | `venus-wifi-power` / `venus-wifi-retry` | `loglevel=8` / `ignore_loglevel` / `oops=panic` / `panic=30` / `sysrq_always_enabled` |
+| `venus-net-watch`（30s 写盘） | `venus-serial`（initrd gadget，挂 `sysinit.target`） | `systemd.log_level=debug` / `udev.log_level=debug` |
+| `venus-usb-watch` + timer（60s 写盘） | `serial-getty@ttyGS0`（正式版不带 `--autologin root`） | initrd `setsid sh` + `boot.initrd.systemd.emergencyAccess` |
+| `venus-probe`（盘上放 probe.sh 就执行） | `venus-pstore-copy`（ramoops → 持久盘，**生产必需**） | `venus-deadman` 自动 dd 回滚 + 重启 |
+| `venus-debug-dump` / `venus-debug-journal`(+timer) | `venus-bootdump`（正式版只写概要）、`venus-grow-nix`、`venus-rtc-*` | debug 内核（KGDB / NETCONSOLE / FTRACE / HARDLOCKUP / HUNG_TASK） |
+
+判据：正式版像一个普通 Linux 设备 —— 没有周期诊断、不写无界日志、不改自己的引导分区、
+串口要密码。需要"无网无串口也能拿证据"时切调试版。
+
+**红线（2026-11-19 实证）**：`fileSystems."/run/nullfs".enable = lib.mkForce false` 不能删。
+fleet 侧（nixos-config）定义了 `nullfsvfs /run/nullfs`，而本板 `boot.extraModulePackages` 被
+`mkForce []`，没有 nullfsvfs 模块；删掉这一行，fstab 多一个挂不上的 mount，启动直接死在
+early boot（`/nix/persistent` 零写入、无串口、无网，只能人工进 fastboot）。
+"本仓库搜不到谁定义它"不等于死配置 —— 它是 fleet 侧定义的。
+
+同类红线：`boot.initrd.availableKernelModules = lib.mkForce [ ]` 也不能删 —— 它挡的是 fleet
+塞进来的全量模块集，删掉后 initrd 触发 `modules-shrunk` 构建，在 opi5p 上以
+`root module: ahci` 失败，闭包直接产不出来。
+
+## 15. 26.11 写法（已清理）
+
+- `networking.wireless.userControlled`（旧的 `.enable` 后缀 26.11 已 `mkRenamedOptionModule`）。
+- 单元排序用 `systemd-udevd.service`；`systemd-udev-settle.service` 在 26.11 不存在。
+- `useNetworkd = true` 时不存在 `network-addresses-*` / `network-setup` 单元，别写它们的 enable。
+- `services.journald` / `services.logind` 只有 `settings.*` 一种写法（那套 `options ? …` 双分支
+  已删）；journald 的值用 `mkDefault`，让 fleet 的 1G/100M 生效。
+- initrd 是 systemd-initrd：用 `udev.log_level=debug`、`boot.initrd.systemd.emergencyAccess`，
+  不要用 dracut 的 `rd.debug` / `rd.udev.log_level` / `boot.shell_on_fail`。
+- `kernel-config-debug` 的符号：`CONFIG_PSTORE_COMPRESS`（不是 `..._DEFLATE_COMPRESS`）、
+  `CONFIG_MTD_OOPS`（不是 `MTD_MTDOOPS`）。
+- 求值必须零 warning：`nix eval .#nixosConfigurations.venus.config.system.build.toplevel.drvPath`
+  不该出现 `evaluation warning: Obsolete option`。

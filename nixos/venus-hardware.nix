@@ -844,7 +844,15 @@ in
   # 2026-11-19 试过删掉它，结果 initrd 改用 fleet 的全量模块集，触发 modules-shrunk 构建
   # （在 opi5p 上以 "root module: ahci" 失败），闭包直接构建不出来 —— 已回退。
   boot.initrd.availableKernelModules = lib.mkForce [ ];
-  # 真死配置（全仓无任何地方定义该挂载点），已删：fileSystems."/run/nullfs".enable = false;
+  # 这一条**不是**死配置，虽然本仓库里搜不到谁定义了 /run/nullfs：
+  # fleet 侧（nixos-config 的 kernel-modules 组件）会定义 `fileSystems."/run/nullfs"`（nullfsvfs，
+  # 一个树外内核模块），而 venus-fleet.nix 把 `boot.extraModulePackages` mkForce 成 [] ——
+  # 于是那个挂载点在这块板子上永远挂不上。留着 fstab 条目会让 local-fs.target 失败：
+  # 2026-11-19 18:12 我把这一行当"死配置"删掉，重新构建后设备启动即死（无 journal、无串口、
+  # 无网，只能人工进 fastboot）；把它加回来才恢复。
+  # 判据：两个闭包的 fstab 只差这一行
+  #   nullfsvfs /run/nullfs nullfsvfs noatime,mode=777,nosuid,nodev,noexec 0 2
+  fileSystems."/run/nullfs".enable = lib.mkForce false;
 
   boot.initrd.kernelModules = [
     "qcom-refgen-regulator" "cec" "drm_display_helper" "drm_dp_aux_bus"

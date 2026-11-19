@@ -184,9 +184,9 @@ ssh root@192.168.0.68 'systemctl reboot'
 
 # M4 — fleet 版跑通（nixos-config 的 `nixosConfigurations.venus` 在真机上起来）
 
-**日期**：2026-11-19 17:24
-**闭包**：`i85wnar0syxm9azfs1cwzh5209s9arhq-nixos-system-venus-26.11pre1122823.04906337b6d5`
-**boot.img md5**：`b2577c4663c858eebae3c1da5b3ee217`（40116224 字节）
+**日期**：2026-11-19（17:24 首次跑通；19:00 更新为调试/正式拆分版）
+**闭包**：`zybiwskqdb06xx8my3y67700yc1c0pw8-nixos-system-venus-26.11pre1122823.04906337b6d5`
+**boot.img md5**：`9f9387fdb8cc34d75cb005acf8943de8`（40116224 字节）
 **DTB md5**：`527c521e5fb792c27608dbfc820f864b`
 **构建命令**（在 `nixos-config` 里，用本地两个仓覆盖远端）：
 
@@ -241,6 +241,27 @@ nix build .#nixosConfigurations.venus.config.system.build.toplevel \
    `wlan0` 永远 DOWN。`tools/boot-img.sh --from-kernel-params` 现在以闭包自带的
    `kernel-params` 为底、去重并裁掉无关键（`vt.default_*` 等会把 512 字节主字段撑爆），
    再补回这三条。
+
+## M4 更新（19:00）：调试/正式拆分 + 26.11 写法清理
+
+- 正式版不再有任何常驻诊断定时器（console-diag / net-watch / usb-watch / probe 全部只在
+  `venus.debug.enable = true` 时存在）；串口 getty 不再 `--autologin root`；initrd 不再起
+  `setsid sh`；`venus-deadman` 在正式版只取证（存 `boot-lastbad.img`）不 dd 不改引导、不重启。
+- 反过来，`venus-pstore-copy`（ramoops → 持久盘）从调试版移进正式版：生产里 pstore 有写入
+  却没人搬运，崩溃现场会随内存丢失。
+- 26.11 写法：`networking.wireless.userControlled`（原名带 `.enable`，26.11 已 mkRenamed）、
+  `after = systemd-udevd.service`（`systemd-udev-settle.service` 已不存在）、journald/logind
+  只留 `settings.*`、调试版用 `udev.log_level=debug` + `boot.initrd.systemd.emergencyAccess`
+  取代 dracut 的 `rd.debug`/`boot.shell_on_fail`、`kernel-config-debug` 里
+  `PSTORE_DEFLATE_COMPRESS→PSTORE_COMPRESS` 与 `MTD_MTDOOPS→MTD_OOPS`。求值 warning 归零。
+- **踩坑记录（重要）**：把 `fileSystems."/run/nullfs".enable = lib.mkForce false` 当"死配置"
+  删掉后，fleet 侧定义的 `nullfsvfs /run/nullfs` 进了 fstab，而本板内核没有 nullfsvfs 模块
+  （`boot.extraModulePackages` 被 mkForce 成 []），18:12 那次启动直接死在 early boot：
+  `/nix/persistent` 一个字都没写、无串口、无网，只能人工进 fastboot。判据：失败闭包与已验收
+  闭包的 `/etc/fstab` **只差这一个 mount 条目**。已恢复并加了长注释。
+- 19:00 验收（闭包 `zybiwskq…` / boot.img `9f9387fd…`）：`wlan0 UP 192.168.0.68/24`（freq 5300、
+  -31 dBm）、`/nix` 225G（用 5.3G）、调试单元 0 个、`venus-pstore-copy` success、
+  `MHI_CB_EE_RDDM` 0、`wmi command` 超时 0、`systemctl --failed` 只有 knot（缺 /nix/sync-servers）。
 
 ## 遗留
 

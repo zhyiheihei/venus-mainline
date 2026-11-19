@@ -3,8 +3,8 @@
 > **最新状态（2026-11-19，里程碑 M3）：NixOS 26.11 + fleet 文件系统布局 + WiFi + 串口全部跑通，
 > 冷启动验收通过。** 细节与判据见 `docs/milestones.md` 的 M3，实验过程见 `docs/experiments.md`。
 >
-> 闭包 `ikdxzx04p70z5sk8klp6yb5mqpn6ar78-nixos-system-venus-26.11.20260914.efe6f07`；
-> boot.img md5 `c04066f955ab02872b471386f451d438`（= `/nix/persistent/boot-milestone.img`）；
+> 闭包 `3rp120jslmjzwf7nr256wf19haadgjs2-nixos-system-venus-26.11.20260914.efe6f07`；
+> boot.img md5 `dad167af087c9d9cc5d59e97b033e324`（= `/nix/persistent/boot-milestone.img`）；
 > DTB md5 `527c521e5fb792c27608dbfc820f864b`。
 >
 > 置信度约定：✅ = 今天带命令实测过；🔶 = 推断或历史记录、用前请复验。
@@ -18,7 +18,7 @@
 - WiFi：`wlan0 UP 192.168.0.68/24`，SSID `moli-1004-backup`、**freq 5300（ch60）**、
   2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2、signal -31 dBm；`ath11k_pci … wcn6855 hw1.1`，
   fw `0x11008104`；`MHI_CB_EE_RDDM` = 0；dmesg 里 `qcom-pcie` 17 行。
-- 系统：`/run/current-system` = `/run/booted-system` = `ikdxzx04…`；`systemctl --failed` = 0。
+- 系统：`/run/current-system` = `/run/booted-system` = `3rp120js…`；`systemctl --failed` = 0。
 - 串口：stage-2 **也活着** —— `/sys/class/udc/*/state` = `configured`、`/dev/ttyGS0` 存在、
   Windows 侧 `COM3` 可用。
 
@@ -77,7 +77,7 @@ tools/mkbtrfs-img.sh "$C" ~/.cache/venus-k27/venus-btrfsN.simg --hostkey <host k
 ## 四、里程碑与回滚
 
 - 回滚目标：`/nix/persistent/boot-milestone.img`（当前 md5 `c04066f9…`）+
-  `/nix/persistent/boot-milestone.closure`（当前 `ikdxzx04…`）。
+  `/nix/persistent/boot-milestone.closure`（当前 `3rp120js…`）。
 - `venus-deadman`：启动 3 分钟后开始，每 90 秒判一次「无 IPv4 且 UDC 未 configured」，
   连续 3 次才动手；先把当前 `boot_b` 存成 `/nix/persistent/boot-lastbad.img`，再回写里程碑镜像并重启；
   若当前已经在跑里程碑闭包则只记录不回写（防死循环）。
@@ -192,11 +192,9 @@ nix develop -c bash -c 'make -C $HOME/.cache/venus-k27/src O=$HOME/.cache/venus-
 
 ## 十一、待办（按优先级）
 
-1. 删掉 `nixos/venus-hardware.nix` 里那个只覆盖 `ProcSubset`/`ProtectProc` 的
-   `systemd.services."wpa_supplicant-wlan0"` —— 它生成一个没有 `ExecStart` 的坏单元。
-2. `docs/usb-serial.md`、`docs/research.md` 两篇还是 25.05/串口攻坚时代的记录，
+1. `docs/usb-serial.md`、`docs/research.md` 两篇还是 25.05/串口攻坚时代的记录，
    里面的 IP（192.168.0.150）与"串口不可用"结论已过期，需要按 M3 重写或归档。
-3. `tools/deploy.sh` / `tools/fetch-logs.sh` / `tools/deploy-2611.sh` 还是刷机+串口时代的流程，
+2. `tools/deploy.sh` / `tools/fetch-logs.sh` / `tools/deploy-2611.sh` 还是刷机+串口时代的流程，
    要么改成 M3 的 SSH+dd 流程，要么标注废弃。
-4. `venus-deadman` 目前把"无 IPv4"当作失败判据之一；M3 之后 WiFi 有独立通道（串口 + 屏幕 +
+3. `venus-deadman` 目前把"无 IPv4"当作失败判据之一；M3 之后 WiFi 有独立通道（串口 + 屏幕 +
    `/nix/persistent` 日志），可以考虑放宽避免误回滚。

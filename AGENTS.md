@@ -7,7 +7,7 @@
 
 **系统是 NixOS 26.11，rootfs 改成 fleet 同款布局**（`/` = tmpfs，`/nix` = btrfs label
 `NIXOS_NIX`、`compress-force=zstd`），`/nix` 已扩到整块 224G。闭包
-`ikdxzx04p70z5sk8klp6yb5mqpn6ar78`，boot.img md5 `c04066f955ab02872b471386f451d438`
+`3rp120jslmjzwf7nr256wf19haadgjs2`，boot.img md5 `dad167af087c9d9cc5d59e97b033e324`
 （= `/nix/persistent/boot-milestone.img`，deadman 的回滚目标；`.closure` 同目录）。
 
 2026-11-19 冷启动实测（日志 `~/venus-logs/20261119-1600/`，设备侧
@@ -17,7 +17,7 @@
 |---|---|
 | 文件系统 | `/` tmpfs `size=80%,mode=755`；`/nix` btrfs `compress-force=zstd:3,autodefrag`，225G 可用 221G |
 | WiFi（WCN6851） | `wlan0 UP 192.168.0.68/24`；SSID `moli-1004-backup` **freq 5300（ch60）**；2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2；signal -31 dBm；fw `0x11008104`；`MHI_CB_EE_RDDM` = 0 |
-| 系统 | `systemctl --failed` = 0；`/run/current-system` = `/run/booted-system` = `ikdxzx04…` |
+| 系统 | `systemctl --failed` = 0；`/run/current-system` = `/run/booted-system` = `3rp120js…` |
 | USB 串口 | stage-2 也活着：`/sys/class/udc/*/state` = `configured`、`/dev/ttyGS0` 存在、Windows `COM3` 可用 |
 | PCIe | dmesg 里 `qcom-pcie` 17 行 |
 
@@ -51,7 +51,9 @@
 7. `/persistent` 已全部改成 `/nix/persistent`（fleet 约定）。tmpfs 根上写 `/persistent`
    等于写内存，重启即失——取证、deadman 计数、里程碑镜像都必须落 `/nix/persistent`。
 8. `venus-grow-nix` 必须用 `btrfs filesystem resize max /nix`；原来写 `resize2fs` 对 btrfs 无效，
-   镜像永远停在 8G。
+   镜像永远停在 8G。另外 `systemd.services."wpa_supplicant-wlan0"` 这个覆盖块（只设
+   `ProcSubset`/`ProtectProc`）会造出一个没有 `ExecStart` 的坏单元，systemd 261 直接拒载
+   —— 已于 2026-11-19 删除，别再写回去。
 
 ## 0. 范围
 

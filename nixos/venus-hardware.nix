@@ -180,12 +180,6 @@ in
     "d /nix/persistent 0755 root root -"
   ];
 
-  systemd.services."wpa_supplicant-wlan0" = lib.mkIf config.networking.wireless.enable {
-    serviceConfig = {
-      ProcSubset = lib.mkForce "all";
-      ProtectProc = lib.mkForce "default";
-    };
-  };
   boot.loader.grub.enable = lib.mkForce false;
   boot.loader.generic-extlinux-compatible.enable = lib.mkForce false;
   boot.kernelParams =

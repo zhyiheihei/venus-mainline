@@ -109,8 +109,8 @@ WiFi 未通，不计入本里程碑。
 # M3 — fleet 文件系统布局（tmpfs / + btrfs /nix）+ WiFi 恢复 + 串口在 stage-2 存活
 
 **日期**：2026-11-19
-**闭包**：`ikdxzx04p70z5sk8klp6yb5mqpn6ar78-nixos-system-venus-26.11.20260914.efe6f07`
-**boot.img md5**：`c04066f955ab02872b471386f451d438`（45772800 字节，= `/nix/persistent/boot-milestone.img`）
+**闭包**：`3rp120jslmjzwf7nr256wf19haadgjs2-nixos-system-venus-26.11.20260914.efe6f07`
+**boot.img md5**：`dad167af087c9d9cc5d59e97b033e324`（45772800 字节，= `/nix/persistent/boot-milestone.img`）
 **DTB md5**：`527c521e5fb792c27608dbfc820f864b`（与 M1/M2 同一份，120626 字节）
 **日志**：`~/venus-logs/20261119-1600/persistent/`（rsync 自设备 `/nix/persistent`），
 设备侧 `/nix/persistent/venus-debug/journal-b.log`、`venus-diag.log`、`venus-dmesg.log`
@@ -125,7 +125,7 @@ WiFi 未通，不计入本里程碑。
 
 | 判据 | 实测 |
 |---|---|
-| `/run/current-system` = `/run/booted-system` | 都是 `ikdxzx04…` |
+| `/run/current-system` = `/run/booted-system` | 都是 `3rp120js…` |
 | `/` | `tmpfs rw,nosuid,nodev,relatime,size=9098648k,mode=755` |
 | `/nix` | `/dev/sda34 btrfs rw,nosuid,nodev,relatime,compress-force=zstd:3,ssd,discard=async,space_cache=v2,autodefrag` |
 | `/nix` 容量 | `225G 3.5G 221G 2%`（`btrfs filesystem usage` → Device size 224.58GiB） |
@@ -166,4 +166,16 @@ ssh root@192.168.0.68 'systemctl reboot'
 ## 里程碑之后
 
 - deadman 的回滚目标已更新为 M3（`boot-milestone.img` = `c04066f9…`，
-  `boot-milestone.closure` = `ikdxzx04…`），且 M3 之前的镜像 `70e14e69…` 已不是当前布局。
+  `boot-milestone.closure` = `3rp120js…`），且 M3 之前的镜像 `70e14e69…` 已不是当前布局。
+
+## M3 最终版本（2026-11-19 16:06 二次冷启动验收）
+
+首次验收后删掉了历史遗留的坏单元覆盖（`systemd.services."wpa_supplicant-wlan0"` 只设
+`ProcSubset`/`ProtectProc`，生成的单元没有 `ExecStart`，systemd 261 直接拒载：
+`Service has no ExecStart=, ExecStop=, or SuccessAction=. Refusing.`），重新构建并再次冷启动验收：
+
+- 闭包 `3rp120jslmjzwf7nr256wf19haadgjs2-…`，boot.img md5 `dad167af087c9d9cc5d59e97b033e324`
+- 实测：`wlan0 UP 192.168.0.68/24`、`systemctl --failed` = 0、
+  `systemctl list-unit-files | grep -c wpa_supplicant-wlan0` = 0、
+  `udc=configured` + `/dev/ttyGS0` 存在、`MHI_CB_EE_RDDM` = 0、`wpa_supplicant.service` active
+- `/nix/persistent/boot-milestone.img` 与该闭包 `.closure` 已同步为这一版（先验收后更新）

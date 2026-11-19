@@ -1,120 +1,202 @@
 # 交接文档（写给下一个接手的 agent）
 
-> **最新状态 (2026-11-15)：WiFi + 串口 + 桌面全部跑通，基线是 10-25 的 25.05。**
+> **最新状态（2026-11-19，里程碑 M3）：NixOS 26.11 + fleet 文件系统布局 + WiFi + 串口全部跑通，
+> 冷启动验收通过。** 细节与判据见 `docs/milestones.md` 的 M3，实验过程见 `docs/experiments.md`。
 >
-> 当前设备（新机，12GB）跑的就是本仓库 HEAD（10ed687 之后），冷启动 2/2 验收通过：
-> `wlan0` 自动关联拿 192.168.0.150（WiFi6 2401.9MBit/s/160MHz/HE-MSS11），
-> 同时 `/sys/class/udc/a600000.usb/state=configured`（串口在 Windows 上是 COM3），
-> `systemctl --failed` 为空，`MHI_CB_EE_RDDM` 计数 0。
+> 闭包 `ikdxzx04p70z5sk8klp6yb5mqpn6ar78-nixos-system-venus-26.11.20260914.efe6f07`；
+> boot.img md5 `c04066f955ab02872b471386f451d438`（= `/nix/persistent/boot-milestone.img`）；
+> DTB md5 `527c521e5fb792c27608dbfc820f864b`。
 >
-> **三条硬前提（缺一条 WiFi 就死，全部有日志实证）**
-> 1. 内核必须有 `userspace-consumer` 补丁：缺它时五路 WiFi regulator probe 报
->    `error -EBUSY: Failed to get supply 'vout'` / `probe failed with error -16`，
->    `/sys/bus/platform/devices/regulator-wifi_*/state` 不存在，
->    `venus-wifi-power` 全部落空，PCIe 永远 `Device not found`。
-> 2. WCN6851(hw1.1) 的 `.num_vdevs` 必须是 **3**，不能照抄 WCN6855 hw2.0 的 4：
->    4 时固件自复位（`firmware crashed: MHI_CB_EE_RDDM` +
->    `failed to receive wmi unified ready event: -110`）。见 `tools/apply-kernel-patches.sh` 第 8 段。
-> 3. `dtbo_b` 必须写零（24MB 全零）。只要 dtbo 里有 overlay，ABL 就用 dtbo 的 DTB，
->    自建 DTB 完全不生效 —— 症状是显示正常但 USB 串口和 WiFi 同时不在。
->
-> **唯一允许偏离 10-25 的地方**：DTS 的内存布局（12GB 机型）：
-> `memory {}` 占位由 ABL 注入、`removed_mem` 0xa000000、`cont_splash`/`framebuffer` 0xea600000、
-> `dfps_data_mem` @0xec900000、`xbl_aop_mem` 0x80600000+0x260000。
->
-> 重新构建：`tools/apply-kernel-patches.sh`（幂等）→ 编交叉内核 → `tools/make-bootimg.sh`
-> （脚本式 initrd + 注入 preinit，cmdline 用 `init=/nix/var/nix/profiles/system/init`）。
+> 置信度约定：✅ = 今天带命令实测过；🔶 = 推断或历史记录、用前请复验。
 
+## 一、当前设备状态（✅ 2026-11-19 15:57 冷启动后实测）
 
-> 最后更新: 2026-10-24 深夜。前任 agent 调试了一整天的状态全部在此。
-> 先读完本文档和 docs/porting-notes.md 再动手。手机状态每次操作前必须与用户确认。
->
-> ⚠️ **可信度警告**: 前任 agent 在本次调试中产出过多个后来被证伪的结论(电池论/尺寸论/header论/QMP论/BCB论),
-> 均已记录在 docs/porting-notes.md「误判记录」。本文档已按置信度分级标注,
-> 但**铁律是: 任何叙述都可用一条命令重新验证(验证命令已附), 验证优先于信任叙述**。
-> 对无验证命令支撑的推断(标 🔶), 当作假设而非事实。
+- 小米 11（venus / SM8350），**12GB 内存**（旧 8GB 机已报废）。槽位 a=Android(EvoX)、b=NixOS；
+  本项目只用 `boot_b`，`boot_a` 不刷不切。
+- 文件系统：`/` = tmpfs（`size=80%,mode=755`）、`/nix` = btrfs label `NIXOS_NIX`
+  （`compress-force=zstd:3,autodefrag`，已扩到整块 **225G，可用 221G**）、持久化在 `/nix/persistent`。
+- WiFi：`wlan0 UP 192.168.0.68/24`，SSID `moli-1004-backup`、**freq 5300（ch60）**、
+  2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2、signal -31 dBm；`ath11k_pci … wcn6855 hw1.1`，
+  fw `0x11008104`；`MHI_CB_EE_RDDM` = 0；dmesg 里 `qcom-pcie` 17 行。
+- 系统：`/run/current-system` = `/run/booted-system` = `ikdxzx04…`；`systemctl --failed` = 0。
+- 串口：stage-2 **也活着** —— `/sys/class/udc/*/state` = `configured`、`/dev/ttyGS0` 存在、
+  Windows 侧 `COM3` 可用。
 
-## 〇、置信度分级说明
+## 二、两条调试通道
 
-- ✅ = 直接多次观测/带验证命令, 可直接采信(但仍建议首次使用时重新验证)
-- 🔶 = 推断或单次观测, 使用前必须自行重新验证
-- ❌ = 前任的错误结论, 已被证伪, 列出仅供避免重蹈
+**主通道：WiFi SSH**
 
-## 一、当前设备状态（已验证）
+```sh
+ssh root@192.168.0.68          # 公钥登录；PasswordAuthentication=no
+```
 
-- 小米 11 (venus, SM8350)，bootloader 已解锁（解锁 + critical 解锁）
-- **slot a = 健康的 EvolutionX 12.3**（boot_a/dtbo_a/vendor_boot_a/vbmeta_a 全部官方原版，2026-10-23 官方 OTA 全量重装过），adb 已授权（密钥在 Windows 侧，插线即可用）
-- **slot b = EvoX 官方**（boot_ab/dtbo_ab/vendor_boot_ab 双槽刷过）
-- misc = 全零（干净）；userdata = 空的（重装时 Format data 过）
-- 注意: a/b 槽的 try-counter 会被失败的引导烧光，烧光后该槽 `Load Error`；`fastboot set_active <slot>` 重置。当前 a 槽标志健康
+**备用通道：USB ACM 串口（Windows COM3）**
 
-## 二、手机现在的引导资产
+```sh
+tools/serial.sh "<命令>" [秒]            # 发一条命令并读回
+tools/serial.sh --read 10                # 只读
+MI11_WAIT=200 tools/serial.sh --read 260  # 端口还没枚举时先等（boot 前起抓取用）
+```
 
-- boot_a = **EvoX 官方 boot.img**（能正常开机进系统）✅ 验证: `fastboot getvar current-slot` + EvoX 能启动
-- vendor_boot_a = **EvoX 官方 vendor_boot**（含小米完整 DTB 7.9MB + EvoX ramdisk）✅ 同上
-- 我们的内核在 `~/mi11-work/images/venus-boot-v15.img`（header v3，11.8MB，内嵌 initramfs）
-  🔶 注意: v15 镜像里的 initramfs 是否真的包含修复后的 init(busybox --install), 构建时序上应该包含但未端到端验证——misc 读出的日志会直接回答(init 是否能跑 dd/mount)
+- 串口上 `ttyGS0` 是 `venus` 用户自动登录 + 无密码 sudo；**root 需要密码**。
+- `ser.ps1` 会一直占用端口直到本次读结束，同一时刻只能有一个进程开 COM3（第二个会报
+  "访问被拒绝"）。抓取脚本的输出是在**结束时**一次性打印的，中途看文件是 0 字节，别误判成没抓到。
+- 想通过串口传密码类内容，先 `stty -echo`，否则会出现在日志里。
 
-## 三、已确证的事实（✅=直接多次观测 / 🔶=推断待验）
+**第三条通道（无网无串口时）：手机屏幕**。`venus-console-diag`（timer，40s 起每 120s）会把
+`ip -br addr` / `iw link` / `systemctl --failed` / wifi 相关 dmesg 打到 `tty0`，同时追加
+`/nix/persistent/venus-diag.log`。故障时让用户拍照即可。
 
-1. ✅ **venus 的 ABL 不支持 `fastboot boot`（内存引导）**：v2/v3/v4 三种 header 均静默不执行。验证: 任一次 `fastboot boot X.img` rc=0 但无任何后续。
-2. ✅ **主线内核 7.2.6 能启动到 initramfs 用户态**：v12 用 45s 时间信标精确回 fastboot 验证(74s 总耗时=引导+信标)。
-3. 🔶 **主线内核下 USB UDC 从未出现过**：从未在手机内部直接观测过(没有日志通道), 仅由「Windows 无 NCM 网卡」推断。**misc 日志(第四节)读出后此条升级为实证或被推翻。**
-4. ✅ **PMIC 硬件看门狗存在且 ~32s 超时**: pdx206 文档记载 + 我们 v12 的 74s 回 fastboot 与之兼容(也可能是 beacon, 二者在本轮实验中不可区分, 但喂狗无害)。
-5. ✅ **v13+ 的 init 会把 dmesg 写进 misc 偏移 4KB 起**: 代码在 kernel/venus/initramfs/init 里可见; 但**写入是否成功从未被读取验证过**(rd12 的输出用户未转述即丢失)。rd14 读取就是验证本身。
-6. 🔶 **`busybox --install -s /bin` 缺失**导致 applet 全不存在: initramfs 只有 busybox+sh 两个文件是 ✅ 直接验证过的; 但「因此 mount/dd 全部失败」是推断(未在手机上直接观测过报错)。
-7. ❌ **已被证伪、勿再采信的旧结论**(详见 porting-notes 误判记录):
-   - 电池/电量问题(用户从未拆机, 满电)
-   - "下载尺寸超限"是真实尺寸问题(实为断连假错误, 192MB flash 实测可行)
-   - header 版本导致 Load Error(v3/v15 同为 v3 header, 一个成功一个循环)
-   - QMP PHY 内建本身导致 panic(v11 QMP=m 仍循环)
-   - BCB boot-recovery 能让小米 ABL 自动进 sideload(实测直落 fastboot)
-   - "v12 的 74s 回 fastboot = 我们的时间信标"(也可能是看门狗, 见第 4 条)
+## 三、部署（首选：完全不碰 fastboot）
 
-## 四、🔴 第一优先任务：读取 v15 的 misc 日志
+设备跑起来后：
 
-v15 引导存活 ~90s，init 每 15 秒把 dmesg 写进 **misc 分区偏移 4KB 起**（`/dev/block/by-name/misc`，BCB 在 0-4KB 别动）。日志里有 UDC/dwc3/qusb2 的探测现场 = 下一步的唯一依据。
+```sh
+C=/nix/store/<closure>-nixos-system-venus-...
+tools/boot-img.sh "$C" /tmp/boot.img                     # cmdline 唯一来源，含 root=fstab
+nix copy --no-check-sigs --to ssh://root@192.168.0.68 "$C"
+scp /tmp/boot.img root@192.168.0.68:/nix/persistent/
+ssh root@192.168.0.68 "
+  dd if=/nix/persistent/boot.img of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync
+  head -c $(stat -c%s /tmp/boot.img) /dev/disk/by-partlabel/boot_b | md5sum   # 读回校验
+  nix-env -p /nix/var/nix/profiles/system --set $C
+  nix-store --add-root /nix/persistent/system-gcroot --indirect -r $C
+  systemctl reboot"
+```
 
-读取流程（rd14 已推到 Windows `C:\Users\<windows-user>\mi11\ramdump14.zip`）：
-1. 用户把手机弄进 fastboot（电源+音量下 15s）
-2. `fastboot flash boot_a venus-boot-v15.img`（misc 不动）
-3. `fastboot set_active a && fastboot continue`（新鲜会话单发，见纪律）
-4. 黑屏挂 60-90s（写日志）→ 用户电源+音量下 → fastboot
-5. `fastboot flash boot_a boot.img`（EvoX）→ `fastboot reboot recovery`
-6. 用户: Apply update → Apply from ADB → 说「好了」
-7. `adb sideload ramdump14.zip` → **用户读屏幕 ~15 行**（venus lines / block / udc / dwc3 / qusb2）→ 把文字转给分析
+只有 **rootfs 本身**要换（新增 store 路径、磁盘布局变化）才需要重做 userdata 镜像：
 
-注意: sideload 的 ui_print **不会**回流 adb stdout（现代 adb），只能屏幕读。每次 sideload 后 adb 自动退出回主菜单。
+```sh
+tools/mkbtrfs-img.sh "$C" ~/.cache/venus-k27/venus-btrfsN.simg --hostkey <host key 文件>
+# 然后 fastboot flash userdata venus-btrfsN.simg（走 Windows 主机，见第六节）
+```
 
-## 五、关键坑位清单（全部踩过，血泪）
+六件套必须同源并登记 md5：kernel / dtb / initrd / `init=` / profile / cmdline。
+`tools/boot-img.sh` 保证前五项取同一个闭包，cmdline 是它内置的唯一来源。
 
-- **fastboot continue 只在新鲜 fastboot 会话里可靠**：同会话第二次起几乎必 `Load Error`。每次引导实验 = 用户重进 fastboot → 单发。
-- **NixOS 侧 fastboot 大传输必断**（报 max allowed 假错误）：刷机一律走 Windows（ssh <windows-user>@<LAN_WINDOWS_IP>，密码 <WINDOWS_SSH_PASSWORD>，工具在 C:\Users\<windows-user>\mi11\platform-tools\）。
-- **Windows 侧 VMware 会抢 USB 总线**：手机从设备列表消失时先让用户重插，别怀疑手机。
-- **Windows adb server 时机病**：模式切换（fastboot↔adb↔sideload）后必须 `adb kill-server` + 重启再扫，否则看不到设备。
-- **Recovery 主菜单 adb 是关的**，只有手动进 Apply from ADB 才有；sideload 完成后自动回主菜单（adb 又关了）。
-- **Recovery 无 /dev/mem、/sys/class/block 被锁、/proc/partitions 为空**；读块设备只能 `/dev/block/bootdevice/by-name/*`（rd7 实证 resolved=/dev/block/sda34）。
-- **recovery 和系统都会挂 /data**（F2FS 重放），写 userdata 尾部存的日志会被吃掉——所以用 misc。
-- **EvoX recovery 的 ui_print 不回流 adb stdout**，只能屏幕读（现代 adb 行为）。
-- getvar max-download-size 报 768MB 但实际不可信；传输断连时报 "Requested download size is more than max allowed" 假错误。
-- 自创的 BCB boot-recovery 自动进 sideload：**小米 ABL 不理**（misc 写 boot-recovery 后 reboot 直落 fastboot）。别再试。
+## 四、里程碑与回滚
 
-## 六、下一步路线（读完成 misc 日志之后）
+- 回滚目标：`/nix/persistent/boot-milestone.img`（当前 md5 `c04066f9…`）+
+  `/nix/persistent/boot-milestone.closure`（当前 `ikdxzx04…`）。
+- `venus-deadman`：启动 3 分钟后开始，每 90 秒判一次「无 IPv4 且 UDC 未 configured」，
+  连续 3 次才动手；先把当前 `boot_b` 存成 `/nix/persistent/boot-lastbad.img`，再回写里程碑镜像并重启；
+  若当前已经在跑里程碑闭包则只记录不回写（防死循环）。
+- **更新里程碑的顺序是硬规矩：先冷启动验收通过，再写 milestone。** 11-18 违反过一次，
+  把坏镜像写成 milestone，deadman 反复回滚到坏镜像，设备彻底失联。
 
-1. 从 dmesg 定位 UDC 不出现/panic 的真因，修 init 或内核配置 → v16
-   - 参考命令行参数依据: pdx206 Phase 4 (regulator_ignore_unused pd_ignore_unused clk_ignore_unused), 对 venus 未单独验证过有效性, 但加上了无害
-2. M1 验收: Windows 出现 NCM 网卡 → `ip addr add 10.15.0.1/24` → `telnet 10.15.0.2`（init 里有 telnetd）→ shell
-3. M2: UFS 实测（init 已有探测代码）
-4. M3: NixOS rootfs（参考 chayleaf OnePlus 6 博客 + pmOS sm8250 kernel 包）
-5. 终点: SteamOS 栈（gamescope + Steam ARM64 + FEX + Turnip[Adreno 660 已支持]），屏幕暂不适配
-6. 参考: mainlining.dev（Iskren Chernev 的 mainline 移植指南）、pdx206-mainline、Fairphone4 FOSDEM 2023 幻灯（首启 40 行 dts 即通 USB）
+## 五、三条硬前提（缺一条 WiFi 就死，全部有日志实证）
 
-## 七、基础设施
+1. **内核必须有 `userspace-consumer` 补丁**（`tools/apply-kernel-patches.sh` 负责，幂等）。
+   缺它时五路 WiFi regulator probe 报
+   `reg-userspace-consumer regulator-wifi_aon: error -EBUSY: Failed to get supply 'vout'`
+   与 `probe with driver reg-userspace-consumer failed with error -16`，
+   `/sys/bus/platform/devices/regulator-wifi_*/state` 不存在 → `venus-wifi-power` 的
+   `echo enabled` 全部落空 → PCIe 永远 `Device not found` → ath11k 一行日志都没有。
+2. **WCN6851（hw1.1）的 `.num_vdevs` 必须是 3**（不是 WCN6855 hw2.0 的 4）：4 时固件自复位
+   `firmware crashed: MHI_CB_EE_RDDM` + `failed to receive wmi unified ready event: -110`。
+   `tools/apply-kernel-patches.sh` 第 8 段负责。
+3. **`dtbo_b` 必须写零**（24MB 全零镜像）。只要 dtbo 槽里有 overlay，ABL 就用 dtbo 的 DTB，
+   自建 DTB 完全不生效 —— 症状是显示正常但串口与 WiFi 同时不在。
+   刷零镜像后 **boot.img 的 cmdline 里必须有 `root=fstab`**，否则 systemd-initrd 不知道 root 是谁，
+   会走到 emergency 并把 `venus-serial.service` 一起取消（详见第六节第 5 条）。
 
-- 构建环境: 本仓 `nix develop`（交叉工具链在内），产物打头部 v3 boot
-- 内核源: `~/.cache/venus-kernel/linux-7.2.6`（makefile 已注 venus dts），构建目录 `~/.cache/venus-kernel/linux-build`
-- initramfs 源: `kernel/venus/initramfs/`（INITRAMFS_SOURCE 内嵌进 Image）
-- 本机镜像服务: `systemctl --user status mi11-http`（:8000 → ~/mi11-work/images/）
-- Windows 拉取: `curl.exe -s -o <file> http://<LAN_HOST_IP>:8000/<file>`
-- 备份/镜像资产: `~/mi11-work/`（evox-17/ 官方镜像 + images/ 全部自编版本 + evox-rom.zip 3.7GB 官方 OTA）
-- 官方救砖路径（已验证）: EvoX First Time Install = flash boot_ab/dtbo_ab/vendor_boot_ab + Format data + adb sideload rom.zip，见 docs/porting-notes.md 2026-10-23 节
+## 六、坑位清单（全部踩过）
+
+1. **`systemd-networkd` 每个 link 只用一个 `.network` 文件**（按文件名取第一个匹配）。
+   MAC 放 `10-wlan0`、IPv4 放 `20-wlan0` 时只应用前者 → 只有 IPv6、没有 IPv4。
+   MAC 与地址必须写在同一个文件里。
+2. **unit 脚本带 `set -e`**：`x=$(... | grep -c ...)` 零匹配会让整个脚本退出；
+   `ip -4 -br addr` 的简要输出**不含 "inet" 字样**（形如 `wlan0 UP 192.168.0.68/24`），
+   用它 grep 'inet ' 恒为 0 —— 曾让 deadman 把"WiFi 通着"误判成无网并每 4~5 分钟回滚重启。
+3. **`venus.debug.enable = true`** 会往 cmdline 注入 `rd.debug` / `loglevel=8` / `oops=panic` /
+   `panic=30`，把 115200 串口灌爆并让任何 oops 变致命。排查请用 `nixosConfigurations.venus-debug`
+   单独构建，别改主配置。
+4. **WiFi**：可以钉 `bssid=be:fc:e7:9e:e8:d5`（同 SSID 的 `…:d4` 认证不过），
+   **但不要钉 `scan_freq`** —— AP 会换信道（11-19 已从 ch36/5180 换到 ch60/5300），
+   钉死后 wpa_supplicant 永远扫不到该 BSS（`wlan0 DOWN`、`iw link` 报 `Not connected`）。
+   `psk` 也要以**能连上的机器**上 NetworkManager 的值作准（11-19 仓库里是 25 字符旧值，
+   握手报 `WPA: 4-Way Handshake failed - pre-shared key may be incorrect` / `WRONG_KEY`）。
+5. **boot.img 只能由 `tools/boot-img.sh` 生成**。手拼 mkbootimg 命令行漏掉 `root=fstab` 时，
+   systemd-initrd 没有 root 描述 → `/`(tmpfs)、`/nix`(btrfs) 都不生成 sysroot 挂载单元 →
+   `initrd-find-nixos-closure` 失败 → `initrd.target` 的 `OnFailure=emergency.target`
+   (`replace-irreversibly`) 把 `venus-serial.service` 一起取消 → **既没网也没串口，零日志**
+   （11-19 连续三次"完全起不来"就是这个，同闭包同 DTB，只差这一个参数）。
+6. **`/persistent` 不存在**：tmpfs 根上没有这个目录，写它等于写内存。
+   全仓已统一为 `/nix/persistent`。initrd 阶段的落盘直接写 `/sysroot/nix/persistent`。
+7. **`btrfs` 扩容不能用 `resize2fs`**：`venus-grow-nix` 用 `btrfs filesystem resize max /nix`。
+   另外它靠 `/nix/persistent/.grow-done` 标记只做一次，换新镜像时注意这个标记是否残留。
+8. **`wpa_supplicant-wlan0.service` 是历史遗留的坏单元**：仓库里只覆盖了 `ProcSubset`/`ProtectProc`，
+   生成的单元没有 `ExecStart`，systemd 261 直接拒载（`Service has no ExecStart=… Refusing.`）。
+   真正干活的是 `wpa_supplicant.service`。这个覆盖块应当删掉（尚未删，见待办）。
+9. **刷机一律走 Windows 主机**（`molis@192.168.0.143`，platform-tools 在
+   `C:\Users\molis\mi11\platform-tools`）：本机 fastboot 大传输会断。
+   必须用 `tools/win-fastboot.sh`（调前调后 `taskkill fastboot.exe`，内置超时），
+   禁止直接 `tools/win.sh "fastboot …"`（找不到设备会无限等待，遗留进程会在下次插线时突然执行）。
+10. **PVE 直通会抢 USB**：手机在 fastboot ↔ Linux gadget 之间重新枚举时，MOLI-VM 侧设备可能消失，
+    拔插数据线（机箱后置口）即可恢复。Windows 侧完全看不到 18D1 时先重插，不要怀疑手机。
+11. **ABL 不支持 `fastboot boot` 内存引导**（静默不执行）：验证只能写 `boot_b` 后 `reboot`。
+12. **EDL（9008）是最后手段**：本机是"免授权 9008"可用的最后一代，`prog_firehose_ddr.elf`
+    改名即可绕授权；工具在 `~/mi11-work/`（MiFlash 自带 QSaharaServer + fh_loader）。
+    大分区读会丢块，不要用于校验。
+13. **厂商固件默认不进 git**，唯一例外 `nixos/firmware/ath11k/WCN6855/hw1.1/`（4MB，WiFi 必需）。
+    内核产物（`Image`、`*.dtb`、`modules/`、解包的 `out/`）一律不进 git。
+14. **`nixos/configuration.nix` 的 WiFi `psk` 只提交占位符**（`<WIFI_PSK>`），明文留在工作区。
+
+## 七、日志与取证
+
+- 拉全量日志：`rsync -az root@192.168.0.68:/nix/persistent/ ~/venus-logs/<时间戳>/persistent/`
+  （`tools/fetch-logs.sh` 是串口/recovery 时代的路子，现在直接 rsync 更快）。
+- 设备侧固定位置：
+  | 阶段 | 位置 |
+  |---|---|
+  | initrd（switch_root 之前） | `/nix/persistent/venus-initrd-boot.log`（`venus-serial` 落盘） |
+  | stage-2 之后 | `journalctl -b`，另有 `/nix/persistent/venus-debug/{journal-b,dmesg,failed}.log` |
+  | 周期快照 | `/nix/persistent/venus-diag.log`（含 `iw link`、failed units、wifi dmesg） |
+  | 内核崩溃 | `/sys/fs/pstore`（ramoops 节点 `0xa9000000`，只配了 `console-size`） |
+- 结论必须落在日志原句上，同一结论至少两条独立证据；拿不到日志的轮次记为"无效实验"。
+- "ping 不通"不是判据：区分不了内核崩、用户态没起、WiFi 没连。
+
+## 八、构建
+
+```sh
+# 系统闭包（内核未变时是增量，几十秒到几分钟）
+nix build --no-link --print-out-paths .#nixosConfigurations.venus.config.system.build.toplevel
+
+# 内核（交叉编译；源码树先打补丁）
+KSRC=$HOME/.cache/venus-k27/src tools/apply-kernel-patches.sh
+nix develop -c bash -c 'make -C $HOME/.cache/venus-k27/src O=$HOME/.cache/venus-k27/build \
+  ARCH=arm64 CROSS_COMPILE=aarch64-unknown-linux-gnu- -j12 Image dtbs'
+```
+
+- flake 源按 git 索引打包：**新增文件必须先 `git add`**，否则不进闭包（踩过：两次构建同一哈希）。
+- 长构建会派发到 `opi5p`（aarch64 原生）跑 initrd 等步骤；`cache.nixos.org` 当前不可达，
+  构建日志里会有大量 15s 超时重试，属正常噪音。
+- 内核红线：不设 `CONFIG_INITRAMFS_SOURCE`（内嵌 initramfs 会遮住 nixpkgs 的 `/bin`）；
+  改 config 后必须核对生成物里目标符号的实际取值。
+
+## 九、刷写红线
+
+绝不 flash：`xbl*`、`xbl_config*`、`abl`、`tz`、`hyp`、`keymaster`、`devcfg`、`cmnlib*`、
+`qupfw`、`imagefv`、`persist`、`modemst1/2` 与分区表。
+可写：`boot_b`、`dtbo_b`、`userdata`。
+
+## 十、周边
+
+- `nixos-config` 仓库里管理着 fleet 与本网络的各台机器；其中 `hosts/router` 就是本网的路由器
+  `192.168.0.1`（SSH 在 **2222** 端口，root 公钥登录；`wlan0` 的 AP 叫 `moli-rk-wifi`）。
+  我们设备连的 `moli-1004-backup`（BSSID `be:fc:e7:9e:e8:d5`）是**另一台**设备，
+  不在 nixos-config 里。排查网络问题时可以用路由器看 DHCP 租约（kea）与桥表：
+  `ssh -p 2222 root@192.168.0.1 'cat /var/lib/kea/dhcp4.leases; bridge fdb show | grep <mac>'`。
+- 历史文档 `docs/porting-notes.md` 已不在仓库里（随早期分支 reset 丢失），其中的"误判记录"
+  不再可查；本文件第六节与 `docs/experiments.md` 是现在唯一权威。
+
+## 十一、待办（按优先级）
+
+1. 删掉 `nixos/venus-hardware.nix` 里那个只覆盖 `ProcSubset`/`ProtectProc` 的
+   `systemd.services."wpa_supplicant-wlan0"` —— 它生成一个没有 `ExecStart` 的坏单元。
+2. `docs/usb-serial.md`、`docs/research.md` 两篇还是 25.05/串口攻坚时代的记录，
+   里面的 IP（192.168.0.150）与"串口不可用"结论已过期，需要按 M3 重写或归档。
+3. `tools/deploy.sh` / `tools/fetch-logs.sh` / `tools/deploy-2611.sh` 还是刷机+串口时代的流程，
+   要么改成 M3 的 SSH+dd 流程，要么标注废弃。
+4. `venus-deadman` 目前把"无 IPv4"当作失败判据之一；M3 之后 WiFi 有独立通道（串口 + 屏幕 +
+   `/nix/persistent` 日志），可以考虑放宽避免误回滚。

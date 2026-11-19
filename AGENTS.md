@@ -1,38 +1,57 @@
 # venus-mainline 约定
 
-<<<<<<< HEAD
 小米 11（venus / SM8350）的 standalone NixOS。目标是系统跑通、WiFi 可用、串口可用，
 日志里不留异常。fleet 角色在本机 standalone 清零前不碰。
 
-## 当前状态（2026-11-18，里程碑 M2）
+## 当前状态（2026-11-19，里程碑 M3：fleet 文件系统布局 + WiFi + 串口）
 
-**系统已是 NixOS 26.11，WiFi 可用**（详见 `docs/milestones.md` 的 M2）。
-闭包 `9a8mifabcqijyhz6g30s6ca2rac1h039`，boot.img md5 `70e14e69afb887b924b2f9aba02f0110`
-（= `/persistent/boot-milestone.img`，deadman 的回滚目标）。
+**系统是 NixOS 26.11，rootfs 改成 fleet 同款布局**（`/` = tmpfs，`/nix` = btrfs label
+`NIXOS_NIX`、`compress-force=zstd`），`/nix` 已扩到整块 224G。闭包
+`ikdxzx04p70z5sk8klp6yb5mqpn6ar78`，boot.img md5 `c04066f955ab02872b471386f451d438`
+（= `/nix/persistent/boot-milestone.img`，deadman 的回滚目标；`.closure` 同目录）。
+
+2026-11-19 冷启动实测（日志 `~/venus-logs/20261119-1600/`，设备侧
+`/nix/persistent/venus-debug/journal-b.log`）：
 
 | 能力 | 实测 |
 |---|---|
-| WiFi（WCN6851） | `wlan0 UP 192.168.0.68/24`；SSID `moli-1004-backup`；2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2；`ath11k_pci wcn6855 hw1.1` fw `0x11008104`；`MHI_CB_EE_RDDM` = 0 |
-| 系统 | 冷启动 2/2，41 秒 ping 通；`systemctl --failed` = 0 |
-| 串口 | 不可用（switch-root 后 UDC 回 `default`；PVE 未把该 USB 直通回 MOLI-VM） |
-| OTG（外接键鼠/U 盘） | **已放弃**（2026-11-18 决定）：host 模式与 xHCI 可用，但端口 5V 需由 `pm8350_gpios 8` 输出；手机接 PC 时两端同时供 5V 会造成电气对顶（实测黑屏、需人工进 fastboot）。用户不接受烧机风险，故不做。详见 docs/experiments.md |
+| 文件系统 | `/` tmpfs `size=80%,mode=755`；`/nix` btrfs `compress-force=zstd:3,autodefrag`，225G 可用 221G |
+| WiFi（WCN6851） | `wlan0 UP 192.168.0.68/24`；SSID `moli-1004-backup` **freq 5300（ch60）**；2401.9 MBit/s / 160MHz / HE-MCS11 / NSS2；signal -31 dBm；fw `0x11008104`；`MHI_CB_EE_RDDM` = 0 |
+| 系统 | `systemctl --failed` = 0；`/run/current-system` = `/run/booted-system` = `ikdxzx04…` |
+| USB 串口 | stage-2 也活着：`/sys/class/udc/*/state` = `configured`、`/dev/ttyGS0` 存在、Windows `COM3` 可用 |
+| PCIe | dmesg 里 `qcom-pcie` 17 行 |
 
-**调试一律走 WiFi SSH：`root@192.168.0.68`。** 串口不再是主通道。
+**两条调试通道**：WiFi SSH `root@192.168.0.68`（主）+ 串口 `tools/serial.sh`（备用，root shell 需
+在 ttyGS0 上输密码；`venus` 用户可无密码 sudo）。
 
-三条容易重踩的坑：
+部署已不需要 fastboot：`nix copy --to ssh://root@192.168.0.68 <closure>` →
+`dd if=<boot.img> of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync`（读回校验 md5）→
+`nix-env -p /nix/var/nix/profiles/system --set <closure>` → `reboot`。deadman 回滚用的也是这条 dd。
+
+容易重踩的坑（前四条 11-18 记，后四条 11-19 记）：
 
 1. `systemd-networkd` **每个 link 只用一个 `.network` 文件**（按文件名取第一个匹配）。
-   把 MAC 放 `10-wlan0`、IPv4 放 `20-wlan0` 时只会应用前者 → 只有 IPv6、没有
-   `192.168.0.150` → 看起来"WiFi 没通"，实际 wpa_supplicant 早已关联成功。
-   MAC 与地址必须写在同一个文件里。
-2. `venus.debug.enable = true` 会往 cmdline 注入 `rd.debug` / `loglevel=8` /
-   `oops=panic` / `panic=30`，在唯一 115200 串口上等于把启动拖成分钟级，且任何 oops 变致命。
-3. systemd 的 unit-script 带 `set -e`：`x=$(... | grep -c ...)` 在零匹配时会让整个脚本
-   立刻退出；且 `ip -4 -br addr` 的**简要输出不含 "inet" 字样**（形如
-   `wlan0 UP 192.168.0.68/24`），用它 grep 'inet ' 恒为 0 —— 曾让 deadman 把
-   "WiFi 明明通着"误判成无网，每 4~5 分钟自动回滚重启（当天反复失联的主因）。
-4. `moli-1004-backup` 在 AP 上有两个 BSSID（`…:d5` 可用、`…:d4` 认证不过）。
-   wpa_supplicant 已钉死 `bssid=…:d5` + `scan_freq=5180`，不要改回 `networks.<ssid>`。
+   把 MAC 放 `10-wlan0`、IPv4 放 `20-wlan0` 时只会应用前者 → 只有 IPv6、没有 IPv4 → 看起来
+   "WiFi 没通"，实际 wpa_supplicant 早已关联成功。MAC 与地址必须写在同一个文件里。
+2. `venus.debug.enable = true` 会往 cmdline 注入 `rd.debug` / `loglevel=8` / `oops=panic` /
+   `panic=30`，在唯一 115200 串口上等于把启动拖成分钟级，且任何 oops 变致命。
+3. systemd 的 unit-script 带 `set -e`：`x=$(... | grep -c ...)` 在零匹配时会让整个脚本立刻退出；
+   且 `ip -4 -br addr` 的**简要输出不含 "inet" 字样**（形如 `wlan0 UP 192.168.0.68/24`），
+   用它 grep 'inet ' 恒为 0 —— 曾让 deadman 把"WiFi 明明通着"误判成无网。
+4. `moli-1004-backup` 在 AP 上有两个 BSSID（`…:d5` 可用、`…:d4` 认证不过），所以钉死
+   `bssid=…:d5` 是对的。**但不要钉 `scan_freq`**：2026-11-19 AP 从 ch36(5180) 换到 ch60(5300)，
+   `scan_freq=5180` 让 wpa_supplicant 永远扫不到该 BSS（症状：`wlan0 DOWN`、`Not connected`）。
+5. **boot.img 只能由 `tools/boot-img.sh` 生成**。手拼 mkbootimg 命令行漏掉 `root=fstab` 时，
+   systemd-initrd 拿不到 root 描述 → `/`(tmpfs) 与 `/nix`(btrfs) 的 sysroot 挂载单元都不会生成 →
+   `initrd-find-nixos-closure` 失败 → `initrd.target` 的 `OnFailure=emergency.target`
+   (`replace-irreversibly`) 把 `venus-serial.service` 一起取消 → **既没网也没串口，零日志**。
+   2026-11-19 实证：同闭包同 DTB，仅 cmdline 有无 `root=fstab` 之差，一死一活。
+6. WiFi `psk` 会与 AP 实际密码不一致（11-19 时仓库里是 25 字符的旧值，4-way handshake 报
+   `WRONG_KEY`）。以一台能连上的机器上 NetworkManager 的 psk 为准，别凭记忆。
+7. `/persistent` 已全部改成 `/nix/persistent`（fleet 约定）。tmpfs 根上写 `/persistent`
+   等于写内存，重启即失——取证、deadman 计数、里程碑镜像都必须落 `/nix/persistent`。
+8. `venus-grow-nix` 必须用 `btrfs filesystem resize max /nix`；原来写 `resize2fs` 对 btrfs 无效，
+   镜像永远停在 8G。
 
 ## 0. 范围
 
@@ -50,7 +69,8 @@
 | 从闭包组装 boot.img（cmdline 唯一来源） | `tools/boot-img.sh <closure> <out.img> [--dtb <dtb>]` |
 | 部署（推闭包 + 切 profile + 可选写 boot_b + 重启） | `tools/deploy.sh <closure> [--boot-img <img>] [--no-reboot]` |
 | 取回完整日志 | `tools/fetch-logs.sh [目录]` |
-| 经 Windows COM 口给设备发命令 | `tools/serial.sh "<命令>" [秒]` / `--read` |
+| 经 Windows COM 口给设备发命令（`MI11_WAIT=秒` 可等端口枚举） | `tools/serial.sh "<命令>" [秒]` / `--read` |
+| 从闭包做 btrfs userdata 镜像（sparse，可直接 flash） | `tools/mkbtrfs-img.sh <closure> <out.simg> [--hostkey <file>]` |
 
 规则：
 
@@ -185,92 +205,24 @@
 - 提交与推送：提交可随时做；推送前说明会触发什么（`nixos-config` 的 master 推送会跑
   CI 的 dnscontrol，可能动线上 DNS）。部署仍需单独授权。
 - 每轮设备实验结束后必须回写 `docs/experiments.md`；工具或规矩有变化同步更新本文件。
-=======
-- 本项目独立于 nixos-config 主仓,专门做小米11(venus)主线 Linux 适配,最终产出 NixOS
-- **新 agent 接手先读 docs/HANDOFF.md（设备现状/已证事实/坑位清单）与 docs/porting-notes.md**
-- 刷机红线:绝不 flash xbl*/xbl_config*/abl/tz/hyp/keymaster/devcfg/cmnlib*/qupfw/imagefv/persist/modemst1/2 与分区表
-- **venus 的 ABL 不支持 `fastboot boot` 内存引导(静默不执行)**:日常验证只能写 `boot_b` 后 `reboot`
-- **单槽单系统**：只有 26.11。`boot_b` 是唯一引导入口，`boot_a` 不再使用（不刷、不切换）。
-  回滚目标是里程碑镜像 `/persistent/boot-milestone.img`（md5 `70e14e69…`），
-  对应闭包记在 `/persistent/boot-milestone.closure`；`venus-deadman` 连续 3 次（每 90 秒）
-  判定无网且无串口时才回写，且"当前已是里程碑闭包"时不回写（防死循环）。
-- 刷机操作走 Windows 主机(`ssh molis@192.168.0.143`,platform-tools 在 `C:\Users\molis\mi11\platform-tools`);
-  本机 fastboot 大传输会断。**每次让用户操作前先声明需要的手机状态**
-- ROM 包与官方镜像常备 `~/mi11-work/`,官方恢复路径见 porting-notes(EvoX First Time Install)
-- 厂商固件默认不进 git；**唯一例外是 `nixos/firmware/ath11k/WCN6855/hw1.1/`**
-  （amss/board/m3/regdb，共 4MB —— WiFi 必需，上游 linux-firmware 只有 hw2.0/hw2.1）。
-  其余（ADSP 11MB、GPU 等）仍 gitignore，从 modem/vendor 分区提取
-- **内核产物不进 git**(`nixos/kernel/` 已 gitignore):内核只能由源码 + `tools/apply-kernel-patches.sh` 重建
-- 提交用 conventional commits,中文说明原因,并写清「改了什么/为什么/怎么验证的/证据在哪」
+## 13. 历史遗留事实（旧文档里仍然有效的部分）
 
-## 当前状态（2026-11-15，已实测 2/2 冷启动）
-
-设备：新机 12GB 内存（旧机 8GB 已随第一次项目终止报废）。槽位：a=Android(EvoX)，b=NixOS。
-
-跑通并通过验收的能力：
-
-| 能力 | 证据 |
-|---|---|
-| WiFi（WCN6851, WiFi6） | `wlan0` 自动关联 `moli-1004-backup` → 192.168.0.150；`iw dev wlan0 link` 报 2401.9 MBit/s 160MHz HE-MCS11 NSS2；root SSH 可用 |
-| USB ACM 串口 | `/sys/class/udc/a600000.usb/state=configured`；Windows 侧 `VID_18D1&PID_4EE1` 的 COM3 |
-| 桌面/触摸/GPU | Plasma 起得来，面板与触摸驱动在 `kernel/venus/` |
-| 系统健康 | `systemctl --failed` 为空，`MHI_CB_EE_RDDM` 计数 0，`free -h` 报 10Gi 可用 |
-
-## 三条硬前提（缺一条 WiFi 就死）
-
-1. **内核必须有 `userspace-consumer` 补丁**。缺它时五路 WiFi regulator probe 报
-   `reg-userspace-consumer regulator-wifi_aon: error -EBUSY: Failed to get supply 'vout'`
-   与 `probe with driver reg-userspace-consumer failed with error -16`，于是
-   `/sys/bus/platform/devices/regulator-wifi_*/state` 不存在，`venus-wifi-power` 的
-   `echo enabled` 全部落空，PCIe 永远停在 `qcom-pcie: Device not found`，ath11k 一行日志都没有。
-2. **WCN6851(hw1.1) 的 `.num_vdevs` 必须是 3**（不能照抄 WCN6855 hw2.0 的 4）。
-   4 时固件自复位：`firmware crashed: MHI_CB_EE_RDDM` + `failed to receive wmi unified ready event: -110`。
-   依据是上游 `[PATCH v2 2/7] wifi: ath11k: enable support for WCN6851` 作者原话
-   “This crashes with the firmware that came with the board … I will revert to 3 vdevs for v3”
-   与 SM8350 用户复现。`tools/apply-kernel-patches.sh` 第 8 段负责这一处（幂等）。
-3. **`dtbo_b` 必须写零**（24MB 全零镜像）。只要 dtbo 槽里有 overlay，ABL 就用 dtbo 的 DTB，
-   自建 DTB 完全不生效——症状是显示正常但 USB 串口与 WiFi 同时不在。
-
-## 基线原则
-
-- **代码基线 = 里程碑 M2 的 26.11**（`docs/milestones.md`）。不再是 25.05 那版。
-- nixpkgs pin 在 `nixos-26.11`（`flake.lock` 固定 `26.11.20260914.efe6f07`）。
-- DTS 里唯一"为硬件而改"的部分是内存布局（12GB 机型）：`memory {}` 占位交给 ABL 注入、
-  `removed_mem` 0xa000000、`cont_splash`/`framebuffer` 0xea600000、
-  `dfps_data_mem` @0xec900000、`xbl_aop_mem` 0x80600000+0x260000。
-- 串口（USB gadget）在 26.11 上不可用（PVE 直通 + switch-root 后 UDC 回 default）；
-  调试一律走 WiFi SSH。做 OTG 时 gadget 会整体让位给 host 模式。
-- `nixos/configuration.nix` 里的 WiFi `psk` 只提交占位符，明文留在工作区。
-
-## 构建与部署
-
-```sh
-# 1) 内核（交叉编译，host 侧，非仿真）
-nix develop -c bash -c 'make -C $HOME/.cache/venus-k27/src O=$HOME/.cache/venus-k27/build \
-  ARCH=arm64 CROSS_COMPILE=aarch64-unknown-linux-gnu- -j12 Image dtbs'
-#    源码树先要打过补丁：
-KSRC=$HOME/.cache/venus-k27/src tools/apply-kernel-patches.sh
-# 2) boot.img（内核 + DTB + NixOS initrd + 注入 preinit，cmdline 用 init=/nix/var/nix/profiles/system/init）
-tools/make-bootimg.sh /tmp/venus.img
-# 3) 刷：boot_b 用 fastboot，rootfs 走 `nix copy --to local?root=…` + img2simg 的 userdata 镜像
-```
-
-- initrd 用 NixOS 官方脚本式 initrd（**不要**迁 systemd-initrd：10-27 已因此半启动一次）
-- 内核红线：不设 `CONFIG_INITRAMFS_SOURCE`（内嵌 initramfs 会遮住 nixpkgs 的 `/bin`），
-  改 config 后必须核对生成物里目标符号的实际取值
-
-## 日志与取证
-
-- 现在是**双通道**：WiFi SSH（`root@192.168.0.150`）+ USB ACM 串口（Windows COM3）。
-  串口在 initrd 与 stage-2 都活着；`tools/serial.sh` 走本机 ACM，Windows 侧用
-  `tools/wserial.sh` 或直接 PowerShell 打开 COM3。
-- 失败时取完整日志：`journalctl -b`、`/persistent/venus-debug/`、`/sys/fs/pstore`；
-  **不要只 grep 几行就下结论**。
-- 结论必须落在日志原句上，同一结论至少两条独立证据；推断（无验证命令）只能当假设。
-
-## 实验纪律
-
-- 一轮只改一个变量，六件套（kernel/dtb/initrd/init=/profile/cmdline）md5 全部登记
-- 判据事先写死；拿不到日志的轮次标为“无效实验”，不得据此下结论
-- 每轮结束后回写 `docs/porting-notes.md`，工具或规矩有变化同步更新本文件
->>>>>>> main
+- 设备是新机 **12GB 内存**（旧 8GB 机已报废）。槽位 a=Android(EvoX)、b=NixOS，本项目只用 b。
+- 本项目独立于 `nixos-config` 主仓；`nixos-config` 里 `hosts/venus` 与 fleet 配置一行不改。
+- 刷机红线同上（见第 11 节）。ROM 包与官方镜像常备 `~/mi11-work/`。
+- **venus 的 ABL 不支持 `fastboot boot` 内存引导**（静默不执行）：验证只能写 `boot_b` 后 `reboot`。
+- **三条硬前提，缺一条 WiFi 就死**：
+  1. 内核必须有 `userspace-consumer` 补丁（`tools/apply-kernel-patches.sh`）。缺它时五路 WiFi
+     regulator probe 报 `reg-userspace-consumer regulator-wifi_aon: error -EBUSY: Failed to get
+     supply 'vout'`，`/sys/bus/platform/devices/regulator-wifi_*/state` 不存在，
+     `venus-wifi-power` 的 `echo enabled` 全部落空，PCIe 永远 `Device not found`。
+  2. WCN6851(hw1.1) 的 `.num_vdevs` 必须是 **3**（不是 hw2.0 的 4），否则固件自复位
+     `firmware crashed: MHI_CB_EE_RDDM` + `failed to receive wmi unified ready event: -110`。
+  3. `dtbo_b` 必须写零（24MB 全零镜像），否则 ABL 用 dtbo 的 DTB，自建 DTB 完全不生效。
+- DTS 里"为硬件而改"的只有内存布局（12GB 机型）：`memory {}` 交给 ABL 注入、`removed_mem`
+  0xa000000、`cont_splash`/`framebuffer` 0xea600000、`dfps_data_mem` @0xec900000、
+  `xbl_aop_mem` 0x80600000+0x260000。
+- 厂商固件默认不进 git；唯一例外 `nixos/firmware/ath11k/WCN6855/hw1.1/`（4MB，上游
+  linux-firmware 只有 hw2.0/hw2.1）。内核产物一律不进 git。
+- `nixos/configuration.nix` 的 WiFi `psk` 只提交占位符，明文留在工作区。
+- 内核红线：不设 `CONFIG_INITRAMFS_SOURCE`（内嵌 initramfs 会遮住 nixpkgs 的 `/bin`）。

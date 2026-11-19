@@ -103,3 +103,67 @@ WiFi 未通，不计入本里程碑。
      实测结果是黑屏、USB 全无、需人工进 fastboot。
   3. 用户明确不接受烧机风险，因此 OTG 整项放弃，仓库与设备均回到 `dr_mode = "peripheral"`
      （里程碑镜像 70e14e69…）。不再尝试该方向。
+
+---
+
+# M3 — fleet 文件系统布局（tmpfs / + btrfs /nix）+ WiFi 恢复 + 串口在 stage-2 存活
+
+**日期**：2026-11-19
+**闭包**：`ikdxzx04p70z5sk8klp6yb5mqpn6ar78-nixos-system-venus-26.11.20260914.efe6f07`
+**boot.img md5**：`c04066f955ab02872b471386f451d438`（45772800 字节，= `/nix/persistent/boot-milestone.img`）
+**DTB md5**：`527c521e5fb792c27608dbfc820f864b`（与 M1/M2 同一份，120626 字节）
+**日志**：`~/venus-logs/20261119-1600/persistent/`（rsync 自设备 `/nix/persistent`），
+设备侧 `/nix/persistent/venus-debug/journal-b.log`、`venus-diag.log`、`venus-dmesg.log`
+
+## 定义
+
+与 fleet 其它主机（opi5p / nanopi-r5c）完全同构的文件系统布局：`/` 是 tmpfs，
+`/nix` 是独立 btrfs（label `NIXOS_NIX`，`compress-force=zstd` + `autodefrag`），
+持久化数据在 `/nix/persistent`；userdata 分区 224G，首次启动用 `btrfs filesystem resize max` 扩容。
+
+## 冷启动实测（2026-11-19 15:57 起）
+
+| 判据 | 实测 |
+|---|---|
+| `/run/current-system` = `/run/booted-system` | 都是 `ikdxzx04…` |
+| `/` | `tmpfs rw,nosuid,nodev,relatime,size=9098648k,mode=755` |
+| `/nix` | `/dev/sda34 btrfs rw,nosuid,nodev,relatime,compress-force=zstd:3,ssd,discard=async,space_cache=v2,autodefrag` |
+| `/nix` 容量 | `225G 3.5G 221G 2%`（`btrfs filesystem usage` → Device size 224.58GiB） |
+| WiFi | `wlan0 UP 192.168.0.68/24`；`iw link` → SSID `moli-1004-backup`、freq 5300.0、signal -31 dBm、rx 2401.9 MBit/s 160MHz HE-MCS11 NSS2 |
+| `systemctl --failed` | 0 |
+| 串口 | `/sys/class/udc/*/state` = `configured`、`/dev/ttyGS0` 存在、Windows `COM3` 可用（**stage-2 也活着**） |
+| `ath11k` | `wcn6855 hw1.1`、`fw_version 0x11008104`；dmesg 里 `MHI_CB_EE_RDDM` = 0 |
+| PCIe | dmesg 里 `qcom-pcie` 17 行 |
+
+## 关键改动
+
+1. **cmdline 必须含 `root=fstab`**（`tools/boot-img.sh` 内置）。缺它时 systemd-initrd 不知道
+   root 是谁，`initrd-fstab` 里的 `/`(tmpfs)、`/nix`(btrfs) 都不会生成 sysroot 挂载单元，
+   `initrd-find-nixos-closure` 失败 → `initrd.target` 的 `OnFailure=emergency.target`
+   (`replace-irreversibly`) 把 `venus-serial.service` 一起取消 → 无网、无串口、零日志。
+2. **WiFi 不再钉 `scan_freq`**：AP 已从 ch36(5180) 换到 ch60(5300)，钉死频率导致永远扫不到该 BSS。
+   保留 `bssid=be:fc:e7:9e:e8:d5`。
+3. **`psk` 更正**：仓库里原来的 25 字符值与 AP 实际密码不符（`WPA: 4-Way Handshake failed -
+   pre-shared key may be incorrect` / `WRONG_KEY`），以能连上的机器上 NetworkManager 的值为准。
+4. **`/persistent` → `/nix/persistent`**（全仓 39 处）：tmpfs 根上写 `/persistent` 等于写内存。
+   initrd 阶段的落盘同时修掉了 `[ -d "VLOGDIR:-/nonexistent" ]` 少写 `$` 的死代码（以前从没落过盘）。
+5. **`venus-grow-nix` 改用 `btrfs filesystem resize max /nix`**（原来写 `resize2fs`，对 btrfs 无效）。
+6. 新增 `venus-console-diag`（timer，40s 起每 120s）：把 `ip -br addr` / `iw link` /
+   `systemctl --failed` / wifi 相关 dmesg 打到 `tty0`（手机屏幕）并追加到
+   `/nix/persistent/venus-diag.log` —— 这是"无网无串口"时唯一还活着的通道。
+
+## 部署方式（不再需要 fastboot）
+
+```sh
+nix copy --to ssh://root@192.168.0.68 <closure>
+scp <boot.img> root@192.168.0.68:/nix/persistent/
+ssh root@192.168.0.68 'dd if=/nix/persistent/<boot.img> of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync'
+ssh root@192.168.0.68 'nix-env -p /nix/var/nix/profiles/system --set <closure>'
+ssh root@192.168.0.68 'systemctl reboot'
+# 读回校验：head -c <boot.img 大小> /dev/disk/by-partlabel/boot_b | md5sum
+```
+
+## 里程碑之后
+
+- deadman 的回滚目标已更新为 M3（`boot-milestone.img` = `c04066f9…`，
+  `boot-milestone.closure` = `ikdxzx04…`），且 M3 之前的镜像 `70e14e69…` 已不是当前布局。

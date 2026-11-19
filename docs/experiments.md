@@ -225,3 +225,36 @@ ath11k_pci 0000:01:00.0: fw_version 0x11008104 ... WLAN.HSP.1.1.c3-00260-...
   的 pinctrl 默认 `output-low` + 运行时切换），继续排查需要直接驱动 PMIC 供电电路。
 - **用户明确不接受烧机风险，OTG 整项终止。** 仓库 DTS 与设备 boot 均回到
   `dr_mode = "peripheral"`（里程碑镜像 md5 `70e14e69afb887b924b2f9aba02f0110`）。
+
+---
+
+# 2026-11-19 根文件系统迁到 fleet 布局（tmpfs / + btrfs /nix）
+
+六件套登记（三轮，闭包逐轮变化，kernel/dtb 始终同一份）：
+
+| 轮次 | 假设 / 唯一变量 | 六件套 | 判据 | 结果 |
+|---|---|---|---|---|
+| A | 手拼 boot.img 的 cmdline 也能起 | 闭包 `lzwjmv8x`、kernel `7.2.6`、dtb `527c521e…`、boot.img `a3f911fe…`（cmdline **无** `root=fstab`）、dtbo_b 全零 | L1 串口 COM3 出现；L2 `wlan0`；L3 ping 192.168.0.68 | ❌ 三者全无，连 emergency shell 都没有（`venus-serial` 被 `initrd.target` 的 OnFailure 取消） |
+| B | 只补 `root=fstab` 就够 | 同 A，仅 cmdline 换成 `tools/boot-img.sh` 生成的 `e714d59c…`（含 `root=fstab`） | 同上 | ✅ 15:07 启动到登录终端（证明 A 的唯一差异 = cmdline） |
+| C | WiFi 失败是 AP 换信道 + psk 过期 | 闭包 `s0yms7ir`（去 `scan_freq`、`/persistent`→`/nix/persistent`、initrd 落盘修 bug）→ 再 `ikdxzx04`（grow 改 btrfs resize） | `wlan0 UP 192.168.0.68`，`iw link` 有速率 | ❌ 仍不通：`WPA: 4-Way Handshake failed - pre-shared key may be incorrect`、`WRONG_KEY` |
+
+C 轮的决定性证据（同一台设备，串口里读到的原句）：
+
+```
+wlan0: Trying to associate with be:fc:e7:9e:e8:d5 (SSID='moli-1004-backup' freq=5300 MHz)
+wlan0: Associated with be:fc:e7:9e:e8:d5
+wlan0: WPA: 4-Way Handshake failed - pre-shared key may be incorrect
+wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid="moli-1004-backup" auth_failures=11 duration=120 reason=WRONG_KEY
+```
+
+- 「去掉 `scan_freq`」这条单独成立：改动后第一次就能 `Associated`（频段 5300），
+  而之前是连扫都扫不到 —— 两个症状不同，是两条独立问题。
+- psk 用**另一台已连上该 AP 的机器**（本机 NetworkManager 的 `moli-1004-backup.nmconnection`）
+  对照：本机 8 字符，仓库里 25 字符，`DIFFERENT`。把本机那份写进 `configuration.nix` 后，
+  设备上手动起 wpa_supplicant 立刻 `Connected to be:fc:e7:9e:e8:d5 … signal -32 dBm`，
+  并且 `ip -4 -br addr show wlan0` 出现 `192.168.0.68/24`（networkd 静态地址自动生效）。
+
+D 轮（最终验收）：闭包 `ikdxzx04…`、boot.img `c04066f9…`，冷启动后
+`/`=tmpfs、`/nix`=btrfs+compress-force=zstd（225G）、`wlan0 UP 192.168.0.68/24`、
+`systemctl --failed`=0、`udc=configured`/`ttyGS0` 存在、`MHI_CB_EE_RDDM`=0。
+日志：`~/venus-logs/20261119-1600/`。

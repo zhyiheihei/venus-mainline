@@ -30,7 +30,11 @@ in
   #   wlan0: authenticate with be:fc:e7:9e:e8:d4     ← 之后一直黏在这个 BSSID 上失败
   # 同一 SSID 在 AP 上对应两个 BSSID（2.4G/5G 两个 radio），协商参数与其中一个
   # radio 不匹配就永远轮不回来，表现为"WiFi 时好时坏"。
-  # 改成单一 network 块，钉死能用的 BSSID 与频段。
+  # 改成单一 network 块，只钉 BSSID。
+  # 钉死能用的 BSSID（:d4 认证过不了），但**不再钉频率**：2026-11-19 实测该 AP 已从
+  # ch36(5180) 换到 ch60(5300)，`scan_freq=5180` 让 wpa_supplicant 只扫 5180，永远扫不到
+  # 这个 BSS → 关联失败 → 无 IPv4。实测：`iw dev wlan0 link` → Connected to
+  # be:fc:e7:9e:e8:d5, freq 5300.0；`nmcli` → moli-1004-backup BE:FC:E7:9E:E8:D5 CHAN 60。
   networking.wireless = {
     enable = true;
     userControlled.enable = false;
@@ -40,8 +44,7 @@ in
         ssid="moli-1004-backup"
         bssid=be:fc:e7:9e:e8:d5
         key_mgmt=WPA-PSK
-        psk="__SECRET_VENUS_WIFI_PSK__"
-        scan_freq=5180
+        psk="<WIFI_PSK>"
         priority=1
       }
     '';
@@ -71,7 +74,8 @@ in
   };
   services.openssh = {
     enable = true;
-    hostKeys = [ { type = "ed25519"; path = "/etc/ssh/ssh_host_ed25519_key"; } ];
+    # / 是 tmpfs，host key 必须放持久盘，否则每次冷启动都会换 key（fleet 同样用这个路径）
+    hostKeys = [ { type = "ed25519"; path = "/nix/persistent/etc/ssh/ssh_host_ed25519_key"; } ];
     settings = {
       PermitRootLogin = "yes";
       PasswordAuthentication = false;

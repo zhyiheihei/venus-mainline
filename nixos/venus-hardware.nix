@@ -15,7 +15,7 @@ let
   );
   venusGadget = ''
     venus_usb_log() {
-      echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> ''${VLOG:-/persistent/venus-usb-state.log} 2>/dev/null || true
+      echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> ''${VLOG:-/nix/persistent/venus-usb-state.log} 2>/dev/null || true
     }
     venus_usb_create() {
       mode=''${1:-acm}
@@ -104,14 +104,14 @@ in
       RemainAfterExit = true;
     };
     script = ''
-      mkdir -p /sysroot/persistent/venus-debug
+      mkdir -p /sysroot/nix/persistent/venus-debug
       {
         systemctl --no-pager --full list-units --all 2>&1 | head -120
         echo
         systemctl --no-pager --full --failed 2>&1 | head -60
         echo
         journalctl -b --no-pager 2>&1 | tail -500
-      } > /sysroot/persistent/venus-debug/initrd.log 2>&1 || true
+      } > /sysroot/nix/persistent/venus-debug/initrd.log 2>&1 || true
       sync || true
     '';
   };
@@ -125,10 +125,10 @@ in
       RemainAfterExit = true;
     };
     script = ''
-      mkdir -p /persistent/venus-debug/pstore
+      mkdir -p /nix/persistent/venus-debug/pstore
       for f in /sys/fs/pstore/*; do
         [ -f "$f" ] || continue
-        cp "$f" "/persistent/venus-debug/pstore/$(date +%Y%m%d-%H%M%S)-$(basename "$f")" 2>/dev/null || true
+        cp "$f" "/nix/persistent/venus-debug/pstore/$(date +%Y%m%d-%H%M%S)-$(basename "$f")" 2>/dev/null || true
         rm -f "$f" 2>/dev/null || true
       done
       sync || true
@@ -142,10 +142,10 @@ in
       Type = "oneshot";
     };
     script = ''
-      mkdir -p /persistent/venus-debug
-      journalctl -b --no-pager > /persistent/venus-debug/journal.log 2>&1 || true
-      systemctl --no-pager --failed > /persistent/venus-debug/failed.log 2>&1 || true
-      dmesg > /persistent/venus-debug/dmesg.log 2>&1 || true
+      mkdir -p /nix/persistent/venus-debug
+      journalctl -b --no-pager > /nix/persistent/venus-debug/journal.log 2>&1 || true
+      systemctl --no-pager --failed > /nix/persistent/venus-debug/failed.log 2>&1 || true
+      dmesg > /nix/persistent/venus-debug/dmesg.log 2>&1 || true
       sync || true
     '';
   };
@@ -177,6 +177,7 @@ in
   # wpa_supplicant 把它当“无 rfkill”处理，不影响连接）。
   systemd.tmpfiles.rules = [
     "c /dev/rfkill 0600 root root 10 242 - -"
+    "d /nix/persistent 0755 root root -"
   ];
 
   systemd.services."wpa_supplicant-wlan0" = lib.mkIf config.networking.wireless.enable {
@@ -400,22 +401,14 @@ in
       if [ -c /dev/ttyGS0 ]; then
         ( setsid sh </dev/ttyGS0 >/dev/ttyGS0 2>&1 & ) || true
       fi
-      # 关键取证：无论后面 stage-2 是否起得来，都把 initrd 阶段的证据落到 /persistent，
+      # 关键取证：无论后面 stage-2 是否起得来，都把 initrd 阶段的证据落到 /nix/persistent，
       # 这样即使整机黑屏（无串口、无 WiFi），下次启动别的镜像也能读到这次失败现场。
       # 绝不在 initrd 里自己挂 rootfs：switch-root 前遗留多余挂载是切换失败的已知来源。
       # 落盘只在 sysroot 已挂好时做（它由 sysroot.mount 负责），否则放弃。
-      VLOGDIR=/sysroot/persistent
-      if [ ! -d "$VLOGDIR" ]; then
-        # fleet/impermanence 的根是 tmpfs，没有 /sysroot/persistent。把持久盘挂到独立的
-        # /vlog（不挂 /sysroot，避免遗留挂载挡住 switch-root），失败就放弃落盘。
-        mkdir -p /vlog
-        if mount -t ext4 /dev/disk/by-label/nixos /vlog 2>/dev/null; then
-          if [ -d /vlog/persistent ]; then VLOGDIR=/vlog/persistent; else VLOGDIR=/vlog; fi
-        else
-          VLOGDIR=""
-        fi
-      fi
-      if [ -n "${VLOGDIR:-}" ] && [ -d "${VLOGDIR:-/nonexistent}" ]; then
+      # 持久盘是 /nix（sysroot 内的 sysroot/nix），所以落盘目录直接取 /sysroot/nix/persistent，
+      # 不再自己挂任何东西（switch_root 前遗留挂载是切换失败的已知来源）。
+      VLOGDIR=/sysroot/nix/persistent
+      if [ -d "$VLOGDIR" ]; then
         {
           echo "=== $(date '+%F %T') initrd dmesg ==="
           dmesg 2>/dev/null | tail -200
@@ -425,10 +418,10 @@ in
           ls /sys/kernel/config/usb_gadget 2>/dev/null
           echo "=== rfkill ==="
           ls -l /dev/rfkill 2>/dev/null
-        } > "$VLOGDIR/venus-initrd-boot.log" 2>&1
+        } > "$VLOGDIR/venus-initrd-boot.log" 2>&1 || true
       fi
-      if [ -d /sysroot/persistent ]; then
-        VLOG=/sysroot/persistent/venus-usb-state.log
+      if [ -d /sysroot/nix/persistent ]; then
+        VLOG=/sysroot/nix/persistent/venus-usb-state.log
         venus_usb_log "initrd: cfgfs=$([ -d /sys/kernel/config/usb_gadget ] && echo yes || echo no) udc=[$(cat /sys/class/udc/*/state 2>/dev/null | tr '\n' ' ')] ttyGS0=$([ -c /dev/ttyGS0 ] && echo yes || echo no)"
       fi
     '';
@@ -475,19 +468,19 @@ in
   # 死手：冷启动后两条通道都没起来就自己重启，避免"黑屏 + 无 USB"需要人工进 fastboot。
   # 依据：2026-11-16/17 多次 26.11 冷启动后 WiFi 与 COM 同时消失、现场零日志（无任何
   # 可观察通道），只能靠人按电源+音量键。这里把"没有通道"变成一次自动重试。
-  # 计数放在 /persistent，重启 3 次仍不行就放弃自动重启，留给人工（并让 ABL 的
+  # 计数放在 /nix/persistent，重启 3 次仍不行就放弃自动重启，留给人工（并让 ABL 的
   # 失败计数把槽位判为不可引导，回落到 boot_a 的 Android，仍有 adb/fastboot）。
   # stage-2 取证同样落盘（60 秒后写一次），配合 initrd 的那份可以拼出完整启动链
-  # 取证：若盘上放了 /persistent/probe.sh，就在启动 20 秒后自动执行它并落盘结果。
+  # 取证：若盘上放了 /nix/persistent/probe.sh，就在启动 20 秒后自动执行它并落盘结果。
   # 这样不需要靠串口在十几秒窗口里手打命令（此前一直是手动发，多次错过）。
   systemd.services.venus-probe = {
-    description = "venus: 若存在 /persistent/probe.sh 则自动执行取证";
+    description = "venus: 若存在 /nix/persistent/probe.sh 则自动执行取证";
     serviceConfig = { Type = "oneshot"; TimeoutStartSec = 180; };
     script = ''
       sleep 20
-      if [ -x /persistent/probe.sh ]; then
-        /persistent/probe.sh || true
-        cp -f /persistent/venus-probe.out /persistent/venus-probe-last.out 2>/dev/null || true
+      if [ -x /nix/persistent/probe.sh ]; then
+        /nix/persistent/probe.sh || true
+        cp -f /nix/persistent/venus-probe.out /nix/persistent/venus-probe-last.out 2>/dev/null || true
       fi
     '';
   };
@@ -498,7 +491,7 @@ in
   };
 
   systemd.services.venus-bootdump = {
-    description = "venus: 把 stage-2 的关键状态写到 /persistent";
+    description = "venus: 把 stage-2 的关键状态写到 /nix/persistent";
     wantedBy = [ "multi-user.target" ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; TimeoutStartSec = 120; };
     script = ''
@@ -515,8 +508,8 @@ in
         cat /sys/kernel/debug/devices_deferred 2>&1 | head -40
         echo "=== pcie/phy/regulator 相关 dmesg ==="
         ${pkgs.util-linux}/bin/dmesg 2>/dev/null | grep -iE 'pcie|qmp|phy|regulator-wifi|userspace-consumer|smmu' | head -60
-      } > /persistent/venus-stage2-boot.log 2>&1
-      ${pkgs.util-linux}/bin/dmesg 2>/dev/null > /persistent/venus-dmesg.log || true
+      } > /nix/persistent/venus-stage2-boot.log 2>&1
+      ${pkgs.util-linux}/bin/dmesg 2>/dev/null > /nix/persistent/venus-dmesg.log || true
     '';
   };
 
@@ -529,20 +522,15 @@ in
     wantedBy = [ "multi-user.target" ];
     after = [ "nix.mount" ];
     requires = [ "nix.mount" ];
-    path = with pkgs; [ e2fsprogs util-linux coreutils ];
+    path = with pkgs; [ btrfs-progs util-linux coreutils ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       [ -e /nix/persistent/.grow-done ] && exit 0
-      dev=$(findmnt --noheadings --output SOURCE --target /nix | sed 's/\[.*//')
-      [ -n "$dev" ] || exit 0
-      dev=$(readlink -f "$dev")
-      cur=$(blockdev --getsize64 "$dev")
-      part=$(cat /sys/class/block/$(basename "$dev")/size)
-      part_bytes=$((part * 512))
-      if [ "$part_bytes" -gt "$cur" ]; then
-        echo "grow /nix: $cur -> $part_bytes"
-        resize2fs "$dev" || exit 1
-      fi
+      findmnt --noheadings --output SOURCE --target /nix >/dev/null || exit 0
+      # /nix 是 btrfs（fleet 布局），扩容用 btrfs filesystem resize max（对应 opi5p-grow-nix）；
+      # 早前这里写的是 resize2fs，对 btrfs 直接失败或空转，镜像 8G 永远长不到 224G。
+      btrfs filesystem resize max /nix || exit 1
+      sync
       touch /nix/persistent/.grow-done
     '';
   };
@@ -552,11 +540,11 @@ in
     serviceConfig = { Type = "oneshot"; TimeoutStartSec = 400; };
     script = ''
       set -u
-      S=/persistent/venus-deadman.count
-      MILESTONE=/persistent/boot-milestone.img
+      S=/nix/persistent/venus-deadman.count
+      MILESTONE=/nix/persistent/boot-milestone.img
       n=$(cat "$S" 2>/dev/null || echo 0)
       if [ "$n" -ge 3 ]; then
-        echo "deadman: 本次启动已回滚 $n 次，放弃（避免无限重启）" | tee -a /persistent/venus-deadman.log
+        echo "deadman: 本次启动已回滚 $n 次，放弃（避免无限重启）" | tee -a /nix/persistent/venus-deadman.log
         exit 0
       fi
       # 连续 3 次（间隔 90 秒）都判定"无 IPv4 且 UDC 未 configured"才动手。
@@ -574,7 +562,7 @@ in
         # WiFi 明明通着，设备每 4~5 分钟自己重启一次。必须用非简要输出。
         ip4=$(${pkgs.iproute2}/bin/ip -4 addr show dev wlan0 2>/dev/null | grep -c 'inet ' || true)
         udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || echo none)
-        echo "deadman: check $i/3 ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" >> /persistent/venus-deadman.log
+        echo "deadman: check $i/3 ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" >> /nix/persistent/venus-deadman.log
         if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then
           bad=$((bad + 1))
         else
@@ -585,19 +573,19 @@ in
       # 保护：若当前启动的就是 milestone 对应的闭包，回写毫无意义（会把坏镜像刷回自己），
       # 只记录并放弃。2026-11-18 实测踩过：milestone 在验证前被指向了坏镜像，
       # deadman 于是把它回写了 3 次，设备始终起不来。
-      if [ "$(readlink -f /run/booted-system)" = "$(cat /persistent/boot-milestone.closure 2>/dev/null)" ]; then
-        echo "deadman: 当前已经是 milestone 闭包，不回写（只记录）" | tee -a /persistent/venus-deadman.log
+      if [ "$(readlink -f /run/booted-system)" = "$(cat /nix/persistent/boot-milestone.closure 2>/dev/null)" ]; then
+        echo "deadman: 当前已经是 milestone 闭包，不回写（只记录）" | tee -a /nix/persistent/venus-deadman.log
         exit 0
       fi
       if [ "$bad" -ge 3 ]; then
         echo $((n + 1)) > "$S"
         if [ -f "$MILESTONE" ]; then
           # 先把当前引导镜像留一份现场，再回写里程碑镜像
-          dd if=/dev/disk/by-partlabel/boot_b of=/persistent/boot-lastbad.img bs=1M 2>/dev/null || true
-          echo "deadman: 回写 boot_b ← $MILESTONE（当前镜像已存 /persistent/boot-lastbad.img）" | tee -a /persistent/venus-deadman.log
+          dd if=/dev/disk/by-partlabel/boot_b of=/nix/persistent/boot-lastbad.img bs=1M 2>/dev/null || true
+          echo "deadman: 回写 boot_b ← $MILESTONE（当前镜像已存 /nix/persistent/boot-lastbad.img）" | tee -a /nix/persistent/venus-deadman.log
           dd if="$MILESTONE" of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync 2>/dev/null || true
         else
-          echo "deadman: 缺 $MILESTONE，只重启不回滚" | tee -a /persistent/venus-deadman.log
+          echo "deadman: 缺 $MILESTONE，只重启不回滚" | tee -a /nix/persistent/venus-deadman.log
         fi
         sync
         ${pkgs.systemd}/bin/systemctl reboot
@@ -630,7 +618,7 @@ in
         st=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null)
         # 只在“根本没有绑定”时才重绑。state=default 表示已绑定、主机正在枚举，
         # 这时再往 UDC 写设备名会让主机重新枚举，永远走不到 configured：
-        # 实测日志（/persistent/venus-usb-state.log，2026-11-17 02:57）表现为
+        # 实测日志（/nix/persistent/venus-usb-state.log，2026-11-17 02:57）表现为
         #   keepalive: state=default rebind / bind UDC=a600000.usb state=default
         # 每 6 秒一次的死循环，主机侧没有 COM、也没有 18D1。
         if [ -z "$st" ] || [ "$st" = "not attached" ]; then
@@ -685,6 +673,34 @@ in
         sleep 30
       done
     '';
+  };
+
+  # 唯一的“任何故障都还在”的通道：把关键状态打到 tty0（手机屏幕），
+  # 同时落一份到持久盘。无 WiFi、无串口时，拍照即可看到 stage-2 的实况。
+  systemd.services.venus-console-diag = {
+    description = "venus: 周期把关键状态打到 tty0 与持久盘";
+    path = with pkgs; [ iproute2 systemd util-linux coreutils bash iw ];
+    serviceConfig = { Type = "oneshot"; TimeoutStartSec = 60; };
+    script = ''
+      out=$(
+        echo "=== $(date '+%F %T') venus diag ==="
+        echo "booted=$(readlink -f /run/booted-system)"
+        ip -br addr | sed 's/^/  /'
+        echo "--- iw link"
+        (iw dev wlan0 link 2>&1 || true) | head -6 | sed 's/^/  /'
+        echo "--- failed units"
+        systemctl --failed --no-pager --plain 2>&1 | head -8 | sed 's/^/  /'
+        echo "--- dmesg"
+        dmesg 2>/dev/null | grep -iE 'ath11k|qcom-pcie|regulator-wifi|wlan0' | tail -8 | sed 's/^/  /'
+      )
+      printf '%s\n\n' "$out" >> /nix/persistent/venus-diag.log 2>/dev/null || true
+      printf '\n%s\n' "$out" > /dev/tty0 2>/dev/null || true
+    '';
+  };
+
+  systemd.timers.venus-console-diag = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = { OnBootSec = "40s"; OnUnitActiveSec = "120s"; Unit = "venus-console-diag.service"; };
   };
 
   systemd.timers.venus-wifi-retry = {

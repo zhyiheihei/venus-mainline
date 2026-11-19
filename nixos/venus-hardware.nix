@@ -372,8 +372,15 @@ in
   boot.initrd.systemd.services.venus-serial = {
     description = "venus: initrd 建 ACM gadget（shell 分离，不阻塞 switch-root）";
     path = with pkgs; [ util-linux coreutils bash ];
-    wantedBy = [ "initrd.target" ];
-    before = [ "initrd.target" ];
+    # 挂到 sysinit.target 而不是 initrd.target：initrd.target 带
+    # OnFailure=emergency.target（replace-irreversibly），一旦 initrd 里任何一步失败
+    # （最典型的是 initrd-find-nixos-closure 解不出 init= 的闭包），它会把排队等
+    # initrd.target 的单元**全部取消**，venus-serial 一起没，于是既没有 COM3 也没有网，
+    # 现场零日志。2026-11-19 两次 fleet 启动就是这样全黑（16:23 那次 udc=default）。
+    # 放到 sysinit.target（更早、且不参与那套 replace-irreversibly），保证无论后面
+    # 怎么失败，串口和 initrd 落盘都已经就位。
+    wantedBy = [ "sysinit.target" ];
+    before = [ "sysinit.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -556,8 +563,13 @@ in
         # WiFi 明明通着，设备每 4~5 分钟自己重启一次。必须用非简要输出。
         ip4=$(${pkgs.iproute2}/bin/ip -4 addr show dev wlan0 2>/dev/null | grep -c 'inet ' || true)
         udc=$(cat /sys/class/udc/a600000.usb/state 2>/dev/null || echo none)
-        echo "deadman: check $i/3 ip4=$ip4 udc=$udc booted=$(readlink -f /run/booted-system)" >> /nix/persistent/venus-deadman.log
-        if [ "$ip4" = "0" ] && [ "$udc" != "configured" ]; then
+        # 判据只看"能不能被连上"，不看 UDC：fleet 角色下 USB gadget 是故意不维护的
+        # （venus-fleet.nix 关掉了 venus-usb-keepalive），而 PVE 直通在重新枚举时还会丢设备，
+        # 于是 udc=configured 完全不代表可达。2026-11-19 16:23 实测：刷了 fleet 闭包后
+        # WiFi 没起来、COM3 也没有，deadman 因 udc=configured 判"健康"而拒绝回滚，设备彻底失联。
+        gw=$(cat /sys/class/net/wlan0/gateway 2>/dev/null || true)
+        echo "deadman: check $i/3 ip4=$ip4 udc=$udc gw=${gw:-none} booted=$(readlink -f /run/booted-system)" >> /nix/persistent/venus-deadman.log
+        if [ "$ip4" = "0" ]; then
           bad=$((bad + 1))
         else
           bad=0

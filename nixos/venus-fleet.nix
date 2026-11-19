@@ -30,10 +30,20 @@ in
     enable = true;
     interfaces = [ "wlan0" ];
     secretsFile = config.sops.secrets."venus-wifi-secrets".path;
-    networks."moli-1004-backup" = {
-      pskRaw = "ext:psk_venus";
-      authProtocols = [ "WPA-PSK" ];
-    };
+    # 不用 networks.<ssid>：nixpkgs 对同一 SSID 会生成 network 块（本机 AP 有两个 BSSID，
+    # `…:d4` 认证不过，`…:d5` 可以），而且不带 bssid，实测会黏在 `…:d4` 上反复失败。
+    # 改成单一 network 块钉死能用的 BSSID；**不钉 scan_freq**（AP 会换信道，
+    # 11-19 已从 ch36/5180 换到 ch60/5300）。psk 仍从 sops 的 ext_password_backend 取。
+    networks = lib.mkForce { };
+    extraConfig = ''
+      network={
+        ssid="moli-1004-backup"
+        bssid=be:fc:e7:9e:e8:d5
+        key_mgmt=WPA-PSK
+        psk=ext:psk_venus
+        priority=1
+      }
+    '';
   };
   sops.secrets."venus-wifi-secrets" = {
     # 用 LT.secret 而不是 inputs.secrets + "..."：后者会把整个 secrets 仓库的
@@ -50,6 +60,15 @@ in
     serviceConfig = {
       Restart = "always";
       RestartSec = 3;
+      # nixpkgs 的 wpa_supplicant 模板 + lantian.harden 的默认档（mkOptionDefault，优先级低于
+      # 模板）叠加后 ProcSubset 仍是 "pid"，于是该单元在起 mount namespace 时就失败：
+      #   wpa_supplicant-wlan0.service: Failed to set up mount namespacing:
+      #     /proc/sys/net: No such file or directory
+      #   Main process exited, code=exited, status=226/NAMESPACE
+      # wpa_supplicant 要读 /proc/sys/net/*（nl80211 能力探测），必须放开 /proc 子集。
+      # 与 nixos-config 里 mptcp.service 的处置同理（那边也是 ProcSubset=all + ProtectProc=default）。
+      ProcSubset = lib.mkForce "all";
+      ProtectProc = lib.mkForce "default";
     };
   };
 

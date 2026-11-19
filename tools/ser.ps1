@@ -21,10 +21,11 @@ if ($file -ne "" -and (Test-Path $file)) {
   $p.WriteLine("")
 }
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$sb = New-Object System.Text.StringBuilder
 while ($sw.Elapsed.TotalSeconds -lt $sec) {
-  try { [void]$sb.Append($p.ReadExisting()) } catch { }
+  try {
+    $chunk = $p.ReadExisting()
+    if ($chunk -ne "") { [Console]::Out.Write($chunk); [Console]::Out.Flush() }
+  } catch { }
   Start-Sleep -Milliseconds 150
 }
 $p.Close()
-Write-Output $sb.ToString()

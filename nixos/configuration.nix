@@ -9,12 +9,16 @@ in
 {
   imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
 
-  venus.debug.enable = false;  # rd.debug/loglevel=8/oops=panic 会把 115200 串口灌爆并让 panic 变致命
+  # 默认走正式版；`nixosConfigurations.venus-debug` 用 mkForce 打开。
+  # 调试版才有的东西：loglevel=8/rd.debug/systemd.log_level=debug、oops=panic+panic=30、
+  # sysrq_always_enabled、initrd 免密 shell、串口 root 免密、周期打屏/写盘的 diag、
+  # probe.sh 调试后门、usb/net watch、deadman 自动回滚、debug 内核（KGDB/NETCONSOLE/
+  # FTRACE/HARDLOCKUP/HUNG_TASK）。
+  venus.debug.enable = lib.mkDefault false;
 
   boot.kernelPackages = pkgs.linuxKernel.packagesFor (venusCross.callPackage ./kernel.nix { });
 
   networking.hostName = "venus";
-  networking.useDHCP = false;
     networking.usePredictableInterfaceNames = false;
   services.resolved.enable = true;
   networking.nameservers = [ wifiGw "223.5.5.5" ];
@@ -37,7 +41,7 @@ in
   # be:fc:e7:9e:e8:d5, freq 5300.0；`nmcli` → moli-1004-backup BE:FC:E7:9E:E8:D5 CHAN 60。
   networking.wireless = {
     enable = true;
-    userControlled.enable = false;
+    userControlled = false;
     networks = { };
     extraConfig = ''
       network={
@@ -62,9 +66,6 @@ in
     address = [ "${wifiIp}/24" ];
     routes = [ { Destination = "0.0.0.0/0"; Gateway = wifiGw; } ];
   };
-  systemd.services."network-addresses-wlan0".enable = false;
-  systemd.services."network-setup".enable = false;
-
   networking.firewall.enable = false;
 
   systemd.services.nix-daemon.environment = {
@@ -93,7 +94,6 @@ in
   # 无桌面：这台机在 fleet 里是 server 角色（见 hosts/venus）。桌面栈此前是
   # 冷启动失败的可疑因素之一，按用户要求整个去掉，只保留串口 + SSH。
   security.polkit.enable = true;
-  programs.dconf.enable = true;
 
   users.users.venus = {
     isNormalUser = true;
@@ -105,38 +105,20 @@ in
     ];
   };
   security.sudo.wheelNeedsPassword = false;
-  services.journald =
-    lib.optionalAttrs (!(options ? services.journald.settings)) {
-      extraConfig = ''
-        Storage=persistent
-        SystemMaxUse=256M
-        SystemMaxFileSize=32M
-      '';
-    }
-    // lib.optionalAttrs (options ? services.journald.settings) {
-      settings.Journal = {
-        Storage = "persistent";
-        SystemMaxUse = "256M";
-        SystemMaxFileSize = "32M";
-      };
-    };
-
-  environment.sessionVariables = {
-    XCURSOR_SIZE = "32";
+  # `services.journald.settings` 在 26.11 必然存在，原来那套
+  # `lib.optionalAttrs (options ? services.journald.settings)` 双分支只剩死代码，
+  # 只保留新写法。mkDefault：fleet 侧（nixos-config 的 journald 组件）统一 1G/100M，
+  # 正式版跟它对齐，别用本地值覆盖；standalone 时这些默认值照旧生效。
+  services.journald.settings.Journal = lib.mkDefault {
+    Storage = "persistent";
+    SystemMaxUse = "256M";
+    SystemMaxFileSize = "32M";
   };
 
-  environment.etc."xdg/kscreenlockerrc".text = ''
-    [Daemon]
-    Autolock=false
-    LockOnResume=false
-    Timeout=0
-  '';
   time.timeZone = "Asia/Shanghai";
   i18n.defaultLocale = "en_US.UTF-8";
   environment.systemPackages = with pkgs; [
-    nautilus seahorse
     vim git htop tmux rsync curl wget iw wpa_supplicant usbutils pciutils busybox e2fsprogs zstd
-    imagemagick
   ];
   services.udev.packages = [ pkgs.usbutils ];
   nix.settings.experimental-features = [ "nix-command" "flakes" ];

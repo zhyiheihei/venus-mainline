@@ -56,7 +56,13 @@ if [ "$from_kp" = 1 ] && [ -f "$closure/kernel-params" ]; then
   # 表现为固件早已加载成功（fw_version 正常）但 40 秒后
   # `ath11k_pci: wmi command 12291 timeout` / `failed to send WMI_SCAN_CHAN_LIST cmd`，
   # 于是 wpa_supplicant 扫不到任何信道、wlan0 永远 DOWN。2026-11-19 17:00 的 fleet 启动实测如此。
-  cmdline="console=ttyGS0,115200 console=tty0 $kp regulator_ignore_unused pd_ignore_unused clk_ignore_unused init=$init_path firmware_class.path=/run/current-system/firmware"
+  # 板级三条现在由 boot.kernelParams 提供（nixos/venus-hardware.nix）；这里只对旧闭包兜底，
+  # 已经在 $kp 里的就不重复追加。
+  board=""
+  for p in regulator_ignore_unused pd_ignore_unused clk_ignore_unused; do
+    case " $kp " in *" $p "*) ;; *) board="$board $p";; esac
+  done
+  cmdline="console=ttyGS0,115200 console=tty0 $kp$board init=$init_path firmware_class.path=/run/current-system/firmware"
 else
   cmdline="console=ttyGS0,115200 console=tty0 loglevel=7 consoleblank=0 root=fstab init=$init_path firmware_class.path=/run/current-system/firmware regulator_ignore_unused pd_ignore_unused clk_ignore_unused net.ifnames=0"
 fi

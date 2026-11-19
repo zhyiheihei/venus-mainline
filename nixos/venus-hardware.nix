@@ -13,9 +13,10 @@ let
       mkdir -p $out/lib/firmware
     ''
   );
+  venusDebug = config.venus.debug.enable;
   venusGadget = ''
     venus_usb_log() {
-      echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> ''${VLOG:-/nix/persistent/venus-usb-state.log} 2>/dev/null || true
+      echo "$(date '+%F %T') [$(cat /proc/1/comm 2>/dev/null)] $*" >> ''${VLOG:-${if venusDebug then "/nix/persistent/venus-usb-state.log" else "/dev/null"}} 2>/dev/null || true
     }
     venus_usb_create() {
       mode=''${1:-acm}
@@ -116,8 +117,11 @@ in
     '';
   };
 
-  systemd.services.venus-debug-pstore = lib.mkIf config.venus.debug.enable {
-    description = "venus-debug: collect pstore from previous crash";
+  # pstore 搬运：两种形态都要。base 内核本来就开着 PSTORE_RAM/CONSOLE，DTS 也有 ramoops
+  # 节点，但记录在内存里 —— 不搬运的话下次启动就没了，而这是内核崩溃唯一的证据来源。
+  # 只有 /sys/fs/pstore 非空时才真正干活，开销可忽略。
+  systemd.services.venus-pstore-copy = {
+    description = "venus: collect pstore from previous crash";
     wantedBy = [ "multi-user.target" ];
     after = [ "local-fs.target" ];
     serviceConfig = {
@@ -168,13 +172,11 @@ in
   #   wlan0: Configuring with /etc/systemd/network/10-wlan0.network.
   #   （再没有任何 20-wlan0 的行，ip -br addr 只有 IPv6）
   # 因此这里不建独立文件，改为把 MAC 合进 20-wlan0（见 configuration.nix）。
-  # 内核没有 CONFIG_RFKILL（device.config 里 "# CONFIG_RFKILL is not set"），
-  # /dev/rfkill 不存在；而 nixpkgs 的 wpa_supplicant.service 把 /dev/rfkill 写死在
-  # BindPaths 里，缺这个节点时启动直接 226/NAMESPACE：
-  #   "Failed to set up mount namespacing: /dev/rfkill: No such file or directory"
-  #   "Main process exited, code=exited, status=226/NAMESPACE"
-  # 这里补一个字符设备节点只为满足 bind mount（没有 rfkill 驱动，打开会 ENODEV，
-  # wpa_supplicant 把它当“无 rfkill”处理，不影响连接）。
+  # nixpkgs 的 wpa_supplicant.service 把 /dev/rfkill 写死在 BindPaths 里，缺这个节点时
+  # 启动直接 226/NAMESPACE（"Failed to set up mount namespacing: /dev/rfkill: No such file
+  # or directory"）。内核其实有 CONFIG_RFKILL=y（kernel-config:1645），开机后
+  # /sys/class/rfkill/rfkill0 与 /dev/rfkill(10:242) 都由 udev 建出来；这条 tmpfiles 规则
+  # 只是给"udev 还没建好就先起 wpa_supplicant"的窗口兜底（同 major/minor，不冲突）。
   systemd.tmpfiles.rules = [
     "c /dev/rfkill 0600 root root 10 242 - -"
     "d /nix/persistent 0755 root root -"
@@ -183,7 +185,19 @@ in
   boot.loader.grub.enable = lib.mkForce false;
   boot.loader.generic-extlinux-compatible.enable = lib.mkForce false;
   boot.kernelParams =
-    [ "console=ttyGS0,115200" "consoleblank=0" ]
+    [
+      "console=ttyGS0,115200"
+      "consoleblank=0"
+      # 板级必需项：WiFi 那五路 userspace-consumer regulator / power domain / clock
+      # 若被内核当成 "unused" 关掉，固件虽能加载（fw_version 正常），但 40 秒后
+      # `ath11k_pci: wmi command 12291 timeout` / `failed to send WMI_SCAN_CHAN_LIST cmd`，
+      # wlan0 永远 DOWN。以前这三条只硬编码在 tools/boot-img.sh 里，导致
+      # "配置 ≠ 引导"：用 fleet 闭包自带的 kernel-params 组镜像就会丢掉它们
+      # （2026-11-19 16:23/17:00 两次 fleet 启动实测）。现在写进配置，两边都由闭包保证。
+      "regulator_ignore_unused"
+      "pd_ignore_unused"
+      "clk_ignore_unused"
+    ]
     ++ lib.optionals config.venus.debug.enable [
     "loglevel=8"
     "ignore_loglevel"
@@ -193,11 +207,17 @@ in
     "printk.always_kmsg_dump=1"
     "systemd.log_level=debug"
     "systemd.journald.forward_to_console=1"
-    "rd.debug"
-    "rd.udev.log_level=debug"
-    "boot.shell_on_fail"
+    # 26.11 的 initrd 是 systemd-initrd，不读 dracut 的 rd.debug / rd.udev.log_level
+    # （那是脚本式 initrd 时代的参数），对应写法是 systemd.log_level（上面已有）与
+    # udev.log_level。initrd 里的免密 shell 也从 boot.shell_on_fail 换成
+    # boot.initrd.systemd.emergencyAccess（下面单独设）。
+    "udev.log_level=debug"
     "sysrq_always_enabled=1"
     ];
+  # 调试版：initrd 出错时给一个免密 shell（systemd-initrd 的开关；boot.shell_on_fail 是
+  # 脚本式 initrd 时代的参数，在这个 initrd 上不生效）。
+  boot.initrd.systemd.emergencyAccess = lib.mkDefault config.venus.debug.enable;
+
   boot.supportedFilesystems = lib.mkForce [
     "btrfs"
     "ext4"
@@ -238,10 +258,8 @@ in
     enable = config.venus.bluetooth;
     powerOnBoot = false;
   };
-  environment.etc."NetworkManager/conf.d/99-venus-powersave.conf".text = ''
-    [connection]
-    wifi.powersave=2
-  '';
+  # 原本这里写 NetworkManager 的 powersave 配置，但本机 networking.networkmanager.enable = false，
+  # NM 根本不存在，配置文件写了也没人读（省电实际由 wpa_supplicant 侧控制）。
   systemd.services."serial-getty@ttyGS0" = {
     enable = true;
     wantedBy = [ "getty.target" ];
@@ -253,7 +271,11 @@ in
     serviceConfig = {
       Restart = "always";
       RestartSec = 3;
-      ExecStart = lib.mkForce "${pkgs.util-linux}/bin/agetty --autologin root --noclear -8 %I 115200";
+      # 正式版就是普通登录提示；`--autologin root` 只在调试版打开。
+      # 串口是这块板唯一的物理通道，所以两种形态都保留 getty，只差要不要免密。
+      ExecStart = lib.mkForce "${pkgs.util-linux}/bin/agetty ${
+        lib.optionalString venusDebug "--autologin root"
+      } --noclear -8 %I 115200";
     };
   };
 
@@ -399,9 +421,12 @@ in
         sleep 1
         n=$((n + 1))
       done
+      ${lib.optionalString venusDebug ''
+      # 调试版：switch-root 之前就给人一个 root shell（正式版没有，避免 initrd 里的免登录面）
       if [ -c /dev/ttyGS0 ]; then
         ( setsid sh </dev/ttyGS0 >/dev/ttyGS0 2>&1 & ) || true
       fi
+      ''}
       # 关键取证：无论后面 stage-2 是否起得来，都把 initrd 阶段的证据落到 /nix/persistent，
       # 这样即使整机黑屏（无串口、无 WiFi），下次启动别的镜像也能读到这次失败现场。
       # 绝不在 initrd 里自己挂 rootfs：switch-root 前遗留多余挂载是切换失败的已知来源。
@@ -432,7 +457,9 @@ in
     description = "venus: 记录 stage-2 后的 USB 状态（不重建，避免主机丢掉首次枚举）";
     path = with pkgs; [ util-linux coreutils bash ];
     wantedBy = [ "multi-user.target" ];
-    after = [ "systemd-udev-settle.service" ];
+    # 26.11 已没有 systemd-udev-settle.service（见上面 serial-getty 的同一条注释）；
+    # 写一个不存在的 unit 名只会让排序彻底失效，改成 udevd 本体。
+    after = [ "systemd-udevd.service" ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
     script = ''
       ${venusGadget}
@@ -474,8 +501,9 @@ in
   # stage-2 取证同样落盘（60 秒后写一次），配合 initrd 的那份可以拼出完整启动链
   # 取证：若盘上放了 /nix/persistent/probe.sh，就在启动 20 秒后自动执行它并落盘结果。
   # 这样不需要靠串口在十几秒窗口里手打命令（此前一直是手动发，多次错过）。
-  systemd.services.venus-probe = {
-    description = "venus: 若存在 /nix/persistent/probe.sh 则自动执行取证";
+  # 调试后门：盘上放 probe.sh 就自动执行。正式版不留这个能力（等于"插上盘就执行脚本"）。
+  systemd.services.venus-probe = lib.mkIf venusDebug {
+    description = "venus: 若存在 /nix/persistent/probe.sh 则自动执行取证（调试版）";
     serviceConfig = { Type = "oneshot"; TimeoutStartSec = 180; };
     script = ''
       sleep 20
@@ -486,11 +514,13 @@ in
     '';
   };
 
-  systemd.timers.venus-probe = {
+  systemd.timers.venus-probe = lib.mkIf venusDebug {
     wantedBy = [ "timers.target" ];
     timerConfig = { OnBootSec = "50s"; Unit = "venus-probe.service"; };
   };
 
+  # 一次性启动快照（覆盖写，不增长）：两种形态都保留，正式版只写概要；
+  # devices_deferred / pcie dmesg / 单元状态这些 verbose 取证只在调试版做。
   systemd.services.venus-bootdump = {
     description = "venus: 把 stage-2 的关键状态写到 /nix/persistent";
     wantedBy = [ "multi-user.target" ];
@@ -504,11 +534,13 @@ in
         cat /sys/class/udc/*/state 2>/dev/null
         ls /sys/kernel/config/usb_gadget 2>/dev/null
         ${pkgs.systemd}/bin/systemctl --failed --no-pager | head -20
+        ${lib.optionalString venusDebug ''
         ${pkgs.systemd}/bin/systemctl status wpa_supplicant systemd-networkd venus-wifi-power venus-usb-keepalive --no-pager 2>&1 | head -40
         echo "=== devices_deferred（-EPROBE_DEFER 的原因就写在这里，正常日志里一个字都不打）==="
         cat /sys/kernel/debug/devices_deferred 2>&1 | head -40
         echo "=== pcie/phy/regulator 相关 dmesg ==="
         ${pkgs.util-linux}/bin/dmesg 2>/dev/null | grep -iE 'pcie|qmp|phy|regulator-wifi|userspace-consumer|smmu' | head -60
+        ''}
       } > /nix/persistent/venus-stage2-boot.log 2>&1
       ${pkgs.util-linux}/bin/dmesg 2>/dev/null > /nix/persistent/venus-dmesg.log || true
     '';
@@ -537,7 +569,7 @@ in
   };
 
   systemd.services.venus-deadman = {
-    description = "venus: 连续 3 次（每 90 秒）判定无网且无串口时回滚到里程碑镜像并重启";
+    description = "venus: 连续 3 次（每 90 秒）判定无 IPv4 后取证（调试版回滚并重启，正式版只记录）";
     serviceConfig = { Type = "oneshot"; TimeoutStartSec = 400; };
     script = ''
       set -u
@@ -545,8 +577,17 @@ in
       MILESTONE=/nix/persistent/boot-milestone.img
       n=$(cat "$S" 2>/dev/null || echo 0)
       if [ "$n" -ge 3 ]; then
-        echo "deadman: 本次启动已回滚 $n 次，放弃（避免无限重启）" | tee -a /nix/persistent/venus-deadman.log
-        exit 0
+        # 达到上限说明这一串启动已经回滚过 3 次。先看当前是否其实健康：
+        # 健康就把计数器清零重新布防（否则这个保护会永久失效 —— 2026-11-19 实测：
+        # 上午连刷三次坏镜像把计数顶到 3，之后每次启动都在这里直接 exit，
+        # 即使 WiFi 已经好了也不再保护；那天后来设备彻底失联时它一声没吭）。
+        if [ "$(${pkgs.iproute2}/bin/ip -4 addr show dev wlan0 2>/dev/null | grep -c 'inet ' || true)" != "0" ]; then
+          rm -f "$S"
+          echo "deadman: 当前已联网，计数器重置并重新布防" >> /nix/persistent/venus-deadman.log
+        else
+          echo "deadman: 本次启动已回滚 $n 次，放弃（避免无限重启）" | tee -a /nix/persistent/venus-deadman.log
+          exit 0
+        fi
       fi
       # 连续 3 次（间隔 90 秒）都判定"无 IPv4 且 UDC 未 configured"才动手。
       # 早前版本只等 240 秒判一次，把"还没起来"当成"起不来"，直接覆盖 boot_b，
@@ -584,17 +625,26 @@ in
         exit 0
       fi
       if [ "$bad" -ge 3 ]; then
-        echo $((n + 1)) > "$S"
-        if [ -f "$MILESTONE" ]; then
-          # 先把当前引导镜像留一份现场，再回写里程碑镜像
-          dd if=/dev/disk/by-partlabel/boot_b of=/nix/persistent/boot-lastbad.img bs=1M 2>/dev/null || true
-          echo "deadman: 回写 boot_b ← $MILESTONE（当前镜像已存 /nix/persistent/boot-lastbad.img）" | tee -a /nix/persistent/venus-deadman.log
-          dd if="$MILESTONE" of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync 2>/dev/null || true
+        # 先把现场留下来：这一步两种形态都做（只读 boot_b，安全）。
+        dd if=/dev/disk/by-partlabel/boot_b of=/nix/persistent/boot-lastbad.img bs=1M 2>/dev/null || true
+        if [ "${if venusDebug then "1" else "0"}" = "1" ]; then
+          # 调试版：自动回滚到里程碑镜像并重启（调试期靠它把设备从"无网无串口"里救回来）。
+          echo $((n + 1)) > "$S"
+          if [ -f "$MILESTONE" ]; then
+            echo "deadman: 回写 boot_b ← $MILESTONE（当前镜像已存 /nix/persistent/boot-lastbad.img）" | tee -a /nix/persistent/venus-deadman.log
+            dd if="$MILESTONE" of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync 2>/dev/null || true
+            sync
+            ${pkgs.systemd}/bin/systemctl reboot
+          else
+            echo "deadman: 缺 $MILESTONE，只记录不重启" | tee -a /nix/persistent/venus-deadman.log
+          fi
         else
-          echo "deadman: 缺 $MILESTONE，只重启不回滚" | tee -a /nix/persistent/venus-deadman.log
+          # 正式版：只取证与告警，**不改引导分区、不自动重启**。
+          # 依据：fleet 里没有一台主机会改写自己的 boot 或自杀重启（见 nixos-config 的
+          # server 角色策略），失败统一交给 OnFailure 告警 + 人工处理。手机只有一个 boot_b，
+          # 自动 dd 回写把"这次实验失败"变成"设备被换回旧系统"，反而更难查。
+          echo "deadman: 判定无网 3 次，已存 /nix/persistent/boot-lastbad.img；正式版不回写、不重启（调试版才会自动回滚）" | tee -a /nix/persistent/venus-deadman.log
         fi
-        sync
-        ${pkgs.systemd}/bin/systemctl reboot
       else
         rm -f "$S"
       fi
@@ -637,8 +687,8 @@ in
     '';
   };
 
-  systemd.services.venus-usb-watch = {
-    description = "venus: 记录 Type-C 角色与 UDC 状态";
+  systemd.services.venus-usb-watch = lib.mkIf venusDebug {
+    description = "venus: 记录 Type-C 角色与 UDC 状态（调试版，每 60 秒写盘）";
     serviceConfig = { Type = "oneshot"; };
     script = ''
       ${venusGadget}
@@ -646,7 +696,7 @@ in
     '';
   };
 
-  systemd.timers.venus-usb-watch = {
+  systemd.timers.venus-usb-watch = lib.mkIf venusDebug {
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "10s";
@@ -655,8 +705,8 @@ in
     };
   };
 
-  systemd.services.venus-net-watch = {
-    description = "venus: 网络/链路状态记录";
+  systemd.services.venus-net-watch = lib.mkIf venusDebug {
+    description = "venus: 网络/链路状态记录（调试版，每 30 秒写盘）";
     wantedBy = [ "multi-user.target" ];
     after = [ "venus-wifi-power.service" ];
     serviceConfig = { Type = "simple"; Restart = "always"; RestartSec = 30; };
@@ -681,10 +731,12 @@ in
     '';
   };
 
-  # 唯一的“任何故障都还在”的通道：把关键状态打到 tty0（手机屏幕），
-  # 同时落一份到持久盘。无 WiFi、无串口时，拍照即可看到 stage-2 的实况。
-  systemd.services.venus-console-diag = {
-    description = "venus: 周期把关键状态打到 tty0 与持久盘";
+  # 调试版专属：把关键状态打到 tty0（手机屏幕）并追加到持久盘。
+  # 正式版不做周期打屏/无界写盘（那不是一个常规 Linux 设备的行为）；正式版靠
+  # journald 持久化 + venus-bootdump 的一次性快照 + pstore 搬运取证。
+  # 需要"无网无串口也能看现场"时，切换到 venus-debug 构建即可。
+  systemd.services.venus-console-diag = lib.mkIf venusDebug {
+    description = "venus: 周期把关键状态打到 tty0 与持久盘（调试版）";
     path = with pkgs; [ iproute2 systemd util-linux coreutils bash iw ];
     serviceConfig = { Type = "oneshot"; TimeoutStartSec = 60; };
     script = ''
@@ -704,7 +756,7 @@ in
     '';
   };
 
-  systemd.timers.venus-console-diag = {
+  systemd.timers.venus-console-diag = lib.mkIf venusDebug {
     wantedBy = [ "timers.target" ];
     timerConfig = { OnBootSec = "40s"; OnUnitActiveSec = "120s"; Unit = "venus-console-diag.service"; };
   };
@@ -749,44 +801,18 @@ in
   systemd.targets.hybrid-sleep.enable = false;
   systemd.targets.suspend-then-hibernate.enable = false;
 
-  services.logind =
-    lib.optionalAttrs (!(options ? services.logind.settings)) {
-      extraConfig = ''
-        HandlePowerKey=ignore
-        HandlePowerKeyLongPress=ignore
-        HandleLidSwitch=ignore
-        HandleSuspendKey=ignore
-        HandleHibernateKey=ignore
-        IdleAction=ignore
-      '';
-    }
-    // lib.optionalAttrs (options ? services.logind.settings) {
-      settings.Login = {
-        HandlePowerKey = "ignore";
-        HandlePowerKeyLongPress = "ignore";
-        HandleLidSwitch = "ignore";
-        HandleSuspendKey = "ignore";
-        HandleHibernateKey = "ignore";
-        IdleAction = "ignore";
-      };
-    };
+  # `services.logind.settings` 在 26.11 必然存在，原来的 `options ?` 双分支只剩死代码。
+  services.logind.settings.Login = {
+    HandlePowerKey = "ignore";
+    HandlePowerKeyLongPress = "ignore";
+    HandleLidSwitch = "ignore";
+    HandleSuspendKey = "ignore";
+    HandleHibernateKey = "ignore";
+    IdleAction = "ignore";
+  };
   services.power-profiles-daemon.enable = false;
-  environment.etc."xdg/powermanagementprofilesrc".text = ''
-    [AC][DimDisplay]
-    idleTime=120000
-
-    [AC][DPMSControl]
-    idleTime=300000
-
-    [Battery][DimDisplay]
-    idleTime=60000
-
-    [Battery][DPMSControl]
-    idleTime=180000
-
-    [LowBattery][BrightnessControl]
-    value=40
-  '';
+  # 这里原本有 Plasma 5 的 powermanagementprofilesrc（DPMS/调光）；本机无桌面，
+  # Plasma 6 也已经改用 powerdevilrc，这段是纯残留，直接删掉。
   environment.etc."venus-bl-toggle.sh".text = ''
     BL=/sys/class/backlight/ae94000.dsi.0
     S=/run/venus-bl-saved
@@ -813,8 +839,12 @@ in
       echo 128 > "$B" 2>/dev/null || true
     '';
   };
+  # 这一行不是死配置：fleet 侧（nixos-config 的 kernel-modules 组件）会把一大堆默认
+  # availableKernelModules 塞进来，mkForce [] 才是把 initrd 收成"只要显式列出的模块"。
+  # 2026-11-19 试过删掉它，结果 initrd 改用 fleet 的全量模块集，触发 modules-shrunk 构建
+  # （在 opi5p 上以 "root module: ahci" 失败），闭包直接构建不出来 —— 已回退。
   boot.initrd.availableKernelModules = lib.mkForce [ ];
-  fileSystems."/run/nullfs".enable = lib.mkForce false;
+  # 真死配置（全仓无任何地方定义该挂载点），已删：fileSystems."/run/nullfs".enable = false;
 
   boot.initrd.kernelModules = [
     "qcom-refgen-regulator" "cec" "drm_display_helper" "drm_dp_aux_bus"

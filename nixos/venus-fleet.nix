@@ -100,16 +100,16 @@ in
   ];
 
   lantian.harden = {
-    "venus-net-watch".enable = "network";
     "wpa_supplicant-wlan0" = {
       enable = "network";
       enableConfinement = false;
     };
   };
-  systemd.services.venus-net-watch.serviceConfig.BindPaths = [
-    "/sys"
-    "/var/log"
-  ];
+  # 以前这里有 `lantian.harden."venus-net-watch".enable` 与
+  # `systemd.services.venus-net-watch.serviceConfig.BindPaths`。venus-net-watch 现在只在
+  # 调试版存在（venus-hardware.nix 里被 venus.debug.enable 门控），正式版再引用它会在
+  # fleet 闭包里凭空造出一个没有 ExecStart 的 venus-net-watch.service（`.service.d/` 覆盖），
+  # 启动后必然 failed。正式版不记这份 30 秒一次的网络流水账。
 
   systemd.network.networks."10-wlan0" = {
     matchConfig.Name = "wlan0";

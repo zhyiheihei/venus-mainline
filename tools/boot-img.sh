@@ -29,7 +29,13 @@ done
 dtb=${dtb:-$closure/dtbs/qcom/sm8350-xiaomi-venus.dtb}
 [ -e "$dtb" ] || { echo "DTB 不存在: $dtb" >&2; exit 1; }
 
-init_path=${init_path:-$closure/init}
+# 默认 init= 指向 profile 符号链接，而不是写死某个闭包的 store 路径。
+# nixpkgs 的 systemd-initrd 明确支持这种写法（initrd-find-nixos-closure 里有注释
+# "Resolve symlinks in the init parameter. We need this for some boot loaders
+#  (e.g. boot.loader.generationsDir)"，用 resolve-in-root /sysroot 解析），
+# 这样 boot.img 与闭包解耦：colmena 换 profile 后重启即用新闭包，不必重刷 boot 分区。
+# profile 本身是 GC 根，所以被引用的闭包不会被 nix.gc 回收。
+init_path=${init_path:-/nix/var/nix/profiles/system/init}
 if [ "$from_kp" = 1 ] && [ -f "$closure/kernel-params" ]; then
   # fleet（nixos-config 组装的闭包）在 kernel-params 里带了一堆必须保留的参数
   # （audit=1 / lsm=landlock,yama,bpf / log_buf_len / sysctl.vm.mem_profiling 等）。

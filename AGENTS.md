@@ -301,3 +301,19 @@ early boot（`/nix/persistent` 零写入、无串口、无网，只能人工进 
   确认没有 `ser.ps1` 进程；实在不行拔插数据线。
 - 注意：**boot.img 里的 `init=` 是写死的**。切了 profile 但没重做 boot.img，设备仍会启动旧闭包
   （实测：profile 指 y7qa61hf、booted 仍是 xi43x42l）。换闭包必须重生成 boot.img 并 dd 两个槽。
+
+## 14. GitHub 访问（超时就走代理）
+
+本网到 GitHub 经常超时（`OpenSSL ... unexpected eof`、`Repository not found` 之类）。可用代理是
+V2Ray（`helpers/proxy.nix` 里的 `outboundProxy`）：`socks5h://192.168.0.62:1080`（opi5p），
+HTTP 端口 `192.168.0.62:1081`。给 git / nix 用的写法：
+
+```sh
+export ALL_PROXY=socks5h://192.168.0.62:1080 https_proxy=socks5h://192.168.0.62:1080 \
+       http_proxy=socks5h://192.168.0.62:1080 \
+       no_proxy=localhost,127.0.0.1,192.168.0.0/16,198.18.0.0/15
+```
+
+`nix flake lock` / `nix eval` 拉 flake input 时同样吃这两个环境变量。私有仓还需要
+`~/.config/nix/netrc`（`machine github.com` + token），否则 nix 报
+`Failed to fetch git repository`，而同一时刻 `git ls-remote` 用 credential helper 是好的。

@@ -45,7 +45,7 @@ in
         ssid="moli-1004-backup"
         bssid=be:fc:e7:9e:e8:d5
         key_mgmt=WPA-PSK
-        psk="<WIFI_PSK>"
+        psk="88888888"
         priority=1
       }
     '';

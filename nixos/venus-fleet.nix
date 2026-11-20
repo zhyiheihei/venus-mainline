@@ -29,34 +29,20 @@ in
   networking.wireless = {
     enable = true;
     interfaces = [ "wlan0" ];
-    secretsFile = config.sops.secrets."venus-wifi-secrets".path;
     # 不用 networks.<ssid>：nixpkgs 对同一 SSID 会生成 network 块（本机 AP 有两个 BSSID，
     # `…:d4` 认证不过，`…:d5` 可以），而且不带 bssid，实测会黏在 `…:d4` 上反复失败。
-    # 改成单一 network 块钉死能用的 BSSID；**不钉 scan_freq**（AP 会换信道，
-    # 11-19 已从 ch36/5180 换到 ch60/5300）。psk 仍从 sops 的 ext_password_backend 取。
     networks = lib.mkForce { };
     extraConfig = ''
       network={
         ssid="moli-1004-backup"
         bssid=be:fc:e7:9e:e8:d5
         key_mgmt=WPA-PSK
-        psk=ext:psk_venus
+        psk="88888888"
         priority=1
       }
     '';
   };
-  sops.secrets."venus-wifi-secrets" = {
-    # 用 LT.secret 而不是 inputs.secrets + "..."：后者会把整个 secrets 仓库的
-    # store 路径（string context）带进系统闭包，触发 nixos-config 的
-    # system.forbiddenDependenciesRegexes 断言（secrets-closure.nix）。
-    sopsFile = LT.secret "per-host/wifi/venus.yaml";
-    key = "wpa-secrets";
-    owner = "wpa_supplicant";
-    mode = "0400";
-  };
   systemd.services."wpa_supplicant-wlan0" = {
-    requires = [ "sops-install-secrets.service" ];
-    after = [ "sops-install-secrets.service" ];
     serviceConfig = {
       Restart = "always";
       RestartSec = 3;

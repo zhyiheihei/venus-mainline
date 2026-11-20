@@ -1,5 +1,5 @@
 
-{ config, lib, modulesPath, options, pkgs, venusCross, ... }:
+{ config, lib, modulesPath, options, pkgs, venusCross, venusKernelPackages ? null, ... }:
 
 let
   wifiIp = "192.168.0.68";
@@ -9,14 +9,11 @@ in
 {
   imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
 
-  # 默认走正式版；`nixosConfigurations.venus-debug` 用 mkForce 打开。
-  # 调试版才有的东西：loglevel=8/rd.debug/systemd.log_level=debug、oops=panic+panic=30、
-  # sysrq_always_enabled、initrd 免密 shell、串口 root 免密、周期打屏/写盘的 diag、
-  # probe.sh 调试后门、usb/net watch、deadman 自动回滚、debug 内核（KGDB/NETCONSOLE/
-  # FTRACE/HARDLOCKUP/HUNG_TASK）。
   venus.debug.enable = lib.mkDefault false;
 
-  boot.kernelPackages = pkgs.linuxKernel.packagesFor (venusCross.callPackage ./kernel.nix { });
+  boot.kernelPackages =
+    if venusKernelPackages != null then venusKernelPackages false
+    else pkgs.linuxKernel.packagesFor (venusCross.callPackage ./kernel.nix { });
 
   networking.hostName = "venus";
     networking.usePredictableInterfaceNames = false;

@@ -35,6 +35,27 @@ done
 echo "== 推闭包 $closure"
 nix copy --no-check-sigs --to "ssh://$user@$ip" "$closure"
 
+# 硬性前置检查：boot.img 里写死的 init= 必须真的在设备的 store 里存在。
+# 2026-11-19 踩过：先 nix copy 旧闭包 → 重建得到新闭包 → 直接 flash 新 boot.img，
+# 结果 initrd 找不到 init= 指向的闭包，进 emergency（有 gadget 但无网络，零日志）。
+if [ -n "$img" ]; then
+  init_path=$(python3 - "$img" <<'PYEOF' 2>/dev/null || true
+import sys,re
+d=open(sys.argv[1],'rb').read()
+cm=d[0x40:0x40+512].split(b'\0')[0].decode()
+m=re.search(r'init=(\S+)', cm)
+print(m.group(1) if m else '')
+PYEOF
+)
+  if [ -z "$init_path" ]; then echo "✗ 无法从 boot.img 解析 init=（cmdline 缺 init=？）" >&2; exit 1; fi
+  if ! ssh "${sshopt[@]}" "$user@$ip" "test -e '$init_path'"; then
+    echo "✗ boot.img 的 init= 在设备上不存在：$init_path" >&2
+    echo "  先把闭包 nix copy 上去，或改用正确的 boot.img（否则 initrd 进 emergency，无网无日志）" >&2
+    exit 1
+  fi
+  echo "   init= 在设备上存在: $init_path"
+fi
+
 if [ -n "$img" ]; then
   [ -f "$img" ] || { echo "boot.img 不存在: $img" >&2; exit 1; }
   size=$(stat -c %s "$img"); md5=$(md5sum "$img" | cut -c1-32)

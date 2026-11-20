@@ -41,18 +41,29 @@
           };
         };
 
-      flake = {
+      flake =
+        let
+          nixpkgs = inputs.nixpkgs;
+          venusCrossFor = nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+          venusHostPkgs = nixpkgs.legacyPackages.aarch64-linux;
+          venusKernelPackages = debug: venusHostPkgs.linuxKernel.packagesFor (
+            venusCrossFor.callPackage ./nixos/kernel.nix { inherit debug; }
+          );
+        in
+        {
         nixosModules.venus = {
           imports = [
             ./nixos/venus-hardware.nix
             ./nixos/venus-fleet.nix
           ];
+          boot.kernelPackages = inputs.nixpkgs.lib.mkForce (venusKernelPackages false);
         };
         nixosConfigurations.venus = inputs.nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
           specialArgs = {
-            venusCross = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+            venusCross = venusCrossFor;
             inherit inputs;
+            inherit venusKernelPackages;
           };
           modules = [
             ./nixos/configuration.nix
@@ -62,18 +73,16 @@
         nixosConfigurations.venus-debug = inputs.nixpkgs.lib.nixosSystem {
           system = "aarch64-linux";
           specialArgs = {
-            venusCross = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
+            venusCross = venusCrossFor;
             inherit inputs;
+            inherit venusKernelPackages;
           };
           modules = [
             ./nixos/configuration.nix
             ({ pkgs, ... }:
-              let debugPkgs = inputs.nixpkgs.legacyPackages.x86_64-linux.pkgsCross.aarch64-multiplatform;
-              in {
+              {
                 venus.debug.enable = true;
-                boot.kernelPackages = inputs.nixpkgs.lib.mkForce (pkgs.linuxKernel.packagesFor (
-                  debugPkgs.callPackage ./nixos/kernel.nix { debug = true; }
-                ));
+                boot.kernelPackages = inputs.nixpkgs.lib.mkForce (venusKernelPackages true);
               })
           ];
         };

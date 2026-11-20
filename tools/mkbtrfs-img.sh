@@ -50,7 +50,8 @@ mkfs.btrfs -q -L NIXOS_NIX -f "$raw"
 
 sudo mount -o loop "$raw" "$mnt"
 
-nix copy --no-check-sigs --to "local?root=$stage" "$closure" >/dev/null
+sudo nix copy --no-check-sigs --to "local?root=$stage" "$closure" >/dev/null
+sudo chown -R root:root "$stage"
 # btrfs 根目录就是 /nix，所以 store 要直接落在根目录下（$mnt/store），不能放进 $mnt/nix。
 sudo mv "$stage"/nix/* "$mnt"/
 [ -e "$mnt/store/$(basename "$closure")" ] || { echo "✗ store 未写入镜像: $mnt/store/$(basename "$closure")" >&2; exit 1; }

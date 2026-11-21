@@ -67,7 +67,10 @@ in
   lantian.backup.enable = lib.mkForce false;
 
   boot.extraModulePackages = lib.mkForce [ ];
-  boot.kernelModules = lib.mkForce [ ];
+  # msm 与面板驱动必须在 stage-2 加载（固件在 /run/current-system/firmware，initrd 里没有），
+  # 同时列进 boot.kernelModules 让 pruneKernelModules 保留它们。mkForce 仍然挡住 fleet
+  # 组件塞进来的整批模块。
+  boot.kernelModules = lib.mkForce [ "msm" "panel-xiaomi-venus-k2" ];
   # mkAfter 而不是 mkForce：mkForce 会把 nixos-config 侧（minimal-components 与
   # impermanence）配置的 initrd 模块整段替换掉，导致持久盘所需模块可能缺失。
   boot.initrd.kernelModules = lib.mkAfter [
@@ -80,8 +83,6 @@ in
     "gpu-sched"
     "mdt_loader"
     "ubwc_config"
-    "msm"
-    "panel-xiaomi-venus-k2"
     "dm-mod"
   ];
 

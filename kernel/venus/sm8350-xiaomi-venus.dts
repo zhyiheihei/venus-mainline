@@ -1311,7 +1311,12 @@
 };
 
 &gpu_zap_shader {
-	firmware-name = "a660_zap.mdt";
+	/* 必须带 qcom/ 前缀：adreno 在 DT 里读到 firmware-name 后直接 request_firmware_direct()，
+	 * 不再走 adreno_request_fw() 的 "先 qcom/ 再 legacy" 兼容逻辑；写成裸文件名会去
+	 * /lib/firmware/a660_zap.mdt 找，而固件装在 qcom/ 下（上游同机型也这么写，例如
+	 * sm8250-xiaomi-elish: "qcom/sm8250/xiaomi/elish/a650_zap.mbn"）。
+	 * 2026-11-21 实测：裸名 → "Unable to load a660_zap.mdt" + "gpu hw init failed: -2". */
+	firmware-name = "qcom/a660_zap.mdt";
 };
 
 /* ---- 蓝牙: WCN6851 on uart18 ---- */

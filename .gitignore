@@ -13,14 +13,19 @@ Image.gz-dtb
 modinst/
 
 # 厂商固件（从 modem/vendor 分区提取）
-# 例外：ath11k/WCN6855/hw1.1 的四个文件（amss/board/m3/regdb，共 4MB）进 git ——
-# 上游 linux-firmware 只有 hw2.0/hw2.1，没有 hw1.1，缺了它们从远端仓库构建的
-# fleet 闭包就没有 WiFi 固件；其余厂商固件（ADSP 11MB、GPU 等）仍不进 git。
-nixos/firmware/
+# 例外：ath11k/WCN6855/hw1.1 的四个文件（amss/board/m3/regdb，共 4MB）与 Adreno 660 的
+# qcom/a660_*（sqe/gmu/zap，约 120KB）进 git —— 上游 linux-firmware 只有 hw2.0/hw2.1 与
+# 一个 a530 zap，缺了它们从远端仓库构建的 fleet 闭包就没有 WiFi/GPU 固件；
+# 其余厂商固件（ADSP 11MB、qca 蓝牙）仍不进 git。
+nixos/firmware/*
 !nixos/firmware/ath11k/
+nixos/firmware/ath11k/*
 !nixos/firmware/ath11k/WCN6855/
+nixos/firmware/ath11k/WCN6855/*
 !nixos/firmware/ath11k/WCN6855/hw1.1/
-!nixos/firmware/ath11k/WCN6855/hw1.1/*
+!nixos/firmware/qcom/
+nixos/firmware/qcom/*
+!nixos/firmware/qcom/a660_*
 
 # 本机缓存/日志
 .venus-logs/

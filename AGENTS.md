@@ -10,6 +10,11 @@
 `3rp120jslmjzwf7nr256wf19haadgjs2`，boot.img md5 `dad167af087c9d9cc5d59e97b033e324`
 （= `/nix/persistent/boot-milestone.img`，deadman 的回滚目标；`.closure` 同目录）。
 
+2026-11-21 起 GPU 也通了（里程碑 M6）：Adreno 660 在 stage-2 载入 `qcom/a660_{sqe.fw,gmu.bin,zap.mdt}`，
+`vulkaninfo` 报 `Turnip Adreno (TM) 660`，`glmark2-es2-drm` Score **188**（多数场景 190~230 FPS）。
+闭包 `i92ci8lcb…`、boot.img `7cc56d7dca7109948e5106f7d74a178b`、DTB
+`51c4f6dd3d4cbfc5e95e86a30464dbf2`（上一份 `527c521e…`）；细节见 `docs/milestones.md` 的 M6。
+
 2026-11-19 冷启动实测（日志 `~/venus-logs/20261119-1600/`，设备侧
 `/nix/persistent/venus-debug/journal-b.log`）：
 
@@ -54,6 +59,16 @@
    镜像永远停在 8G。另外 `systemd.services."wpa_supplicant-wlan0"` 这个覆盖块（只设
    `ProcSubset`/`ProtectProc`）会造出一个没有 `ExecStart` 的坏单元，systemd 261 直接拒载
    —— 已于 2026-11-19 删除，别再写回去。
+9. **`msm`（含 Adreno/DPU/DSI/面板）不能放 initrd**。cmdline 的
+   `firmware_class.path=/run/current-system/firmware` 是 stage-2 才建的符号链接，initrd 里
+   连 `/lib/firmware` 都没有，4.8s 的 `adreno_request_fw` 必然 `failed with error -2` 且永不重试
+   —— 实测症状是显示正常、GPU 永远 `renderD128` 空转。2026-11-21 把它移到 `boot.kernelModules`
+   （fleet 用 `mkForce [ "msm" "panel-xiaomi-venus-k2" ]`）后，同一内核立刻载入固件。
+10. **zap shader 的 DT 属性必须写全路径**：`&gpu_zap_shader { firmware-name = "qcom/a660_zap.mdt"; }`。
+    adreno 读到 `firmware-name` 后直接 `request_firmware_direct()`，**不再**走
+   `adreno_request_fw()` 的"先 qcom/ 再 legacy"兼容；写裸名就去 `/lib/firmware/a660_zap.mdt` 找，
+   结果是 `Unable to load a660_zap.mdt` + `gpu hw init failed: -2`。上游同机型同样带前缀
+   （`sm8250-xiaomi-elish`: `qcom/sm8250/xiaomi/elish/a650_zap.mbn`）。
 
 ## 0. 范围
 
@@ -69,7 +84,7 @@
 | Windows 侧 USB（fastboot / 18D1 / COM） | `tools/win-probe.sh` |
 | fastboot（内置超时，无设备返回 3） | `tools/win-fastboot.sh devices` / `"flash boot_b C:/…"` |
 | 从闭包组装 boot.img（cmdline 唯一来源） | `tools/boot-img.sh <closure> <out.img> [--dtb <dtb>]` |
-| 部署（推闭包 + 可选 dd 写 boot_b 并读回校验 + 切 profile/GC 根 + 重启，全程 SSH 不碰 fastboot） | `tools/deploy.sh <closure> [--boot-img <img>\|--build-boot-img] [--no-reboot]` |
+| 部署（推闭包 + 可选 dd 写 boot_b/boot_a 并逐个读回校验 + 切 profile/GC 根 + 重启，全程 SSH 不碰 fastboot） | `tools/deploy.sh <closure> [--boot-img <img>\|--build-boot-img] [--no-reboot]`（`VENUS_PORT=2222` 用于 fleet） |
 | 取回完整日志（rsync 设备 `/nix/persistent`，含 initrd/stage-2/diag 三份） | `tools/fetch-logs.sh [目录]` |
 | 经 Windows COM 口给设备发命令（`MI11_WAIT=秒` 可等端口枚举） | `tools/serial.sh "<命令>" [秒]` / `--read` |
 | 从闭包做 btrfs userdata 镜像（sparse，可直接 flash） | `tools/mkbtrfs-img.sh <closure> <out.simg> [--hostkey <file>]` |
@@ -173,6 +188,10 @@
 ## 9. 构建
 
 - 优先 ml-builder 全速（客户端 `cores = 28`）；aarch64 原生打包步骤才派 opi5p，压到 4 jobs。
+- fleet 闭包用的是预编译内核（`nixos/kernel-prebuilt.nix`），**不带 `dtbs/`**，所以给 fleet 打
+  boot.img 必须显式 `--dtb <file>`。DTB 可以从本仓库 DTS 单独复现，与内核 kbuild 产物逐字节一致
+  （2026-11-21 用旧 DTS 验证过 md5 `527c521e…`）：
+  `gcc -E -nostdinc -I kernel/linux-7.2.6/include -I kernel/linux-7.2.6/arch/arm64/boot/dts -I kernel/linux-7.2.6/arch/arm64/boot/dts/qcom -undef -D__DTS__ -x assembler-with-cpp -o /tmp/x.dts kernel/venus/sm8350-xiaomi-venus.dts && dtc -I dts -O dtb -o out/dtb /tmp/x.dts`
 - 缓存只用 ncps；`builders-use-substitutions = false`。
 - 构建失败先读完整 `nix log`，不做无诊断重试。
 - 长构建主动报进度（在编什么、负载、剩余大件）。
@@ -224,8 +243,9 @@
 - DTS 里"为硬件而改"的只有内存布局（12GB 机型）：`memory {}` 交给 ABL 注入、`removed_mem`
   0xa000000、`cont_splash`/`framebuffer` 0xea600000、`dfps_data_mem` @0xec900000、
   `xbl_aop_mem` 0x80600000+0x260000。
-- 厂商固件默认不进 git；唯一例外 `nixos/firmware/ath11k/WCN6855/hw1.1/`（4MB，上游
-  linux-firmware 只有 hw2.0/hw2.1）。内核产物一律不进 git。
+- 厂商固件默认不进 git；例外两个：`nixos/firmware/ath11k/WCN6855/hw1.1/`（4MB，上游
+  linux-firmware 只有 hw2.0/hw2.1）与 `nixos/firmware/qcom/a660_*`（约 120KB，上游只有 sqe/gmu，
+  没有 a660 的 zap）。其余（qca 蓝牙、ADSP）只在本机工作区，`tools/extract-firmware.sh` 负责重取。内核产物一律不进 git。
 - `nixos/configuration.nix` 的 WiFi `psk` 只提交占位符，明文留在工作区。
 - 内核红线：不设 `CONFIG_INITRAMFS_SOURCE`（内嵌 initramfs 会遮住 nixpkgs 的 `/bin`）。
 

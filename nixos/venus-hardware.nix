@@ -1,8 +1,11 @@
 { config, lib, options, pkgs, ... }:
 
 let
-  # 厂商固件（bdwlan 当 board.bin、amss/m3/regdb）不进 git（体积与版权），只在本机工作区存在。
-  # 做存在性判断：有则打进闭包；没有（例如从远端仓库构建 fleet 配置）则退回 nixpkgs 的
+  # 厂商固件：ath11k WCN6851 hw1.1（4MB）与 Adreno 660 的 zap/gmu/sqe（约 120KB）进 git，
+  # 其余（qca 蓝牙、ADSP）只在本机工作区存在。路径必须与驱动请求的名字一致：
+  #   lib/firmware/ath11k/...                ath11k
+  #   lib/firmware/qcom/a660_{sqe.fw,gmu.bin,zap.mdt,zap.b0*}   adreno（少了 qcom/ 这一级就永远 -2）
+  # 做存在性判断：没有本地 firmware 目录（例如只有 partial checkout）则退回 nixpkgs 的
   # linux-firmware，避免求值期报 "path .../nixos/firmware does not exist"。
   hasLocalFirmware = builtins.pathExists ./firmware;
   venusFirmware = pkgs.runCommandLocal "venus-firmware" { } (
@@ -870,12 +873,18 @@ in
   #   nullfsvfs /run/nullfs nullfsvfs noatime,mode=777,nosuid,nodev,noexec 0 2
   fileSystems."/run/nullfs".enable = lib.mkForce false;
 
+  # msm（Adreno 660 + DPU/DSI）**不能**在 initrd 里加载：cmdline 把固件搜索路径设成
+  # firmware_class.path=/run/current-system/firmware，而那是 stage-2 才建立的符号链接；
+  # initrd 里既没有 /run/current-system 也没有 /lib/firmware，于是 adreno_request_fw 必然 -2：
+  #   msm_dpu ae01000.display-controller: Direct firmware load for qcom/a660_sqe.fw failed with error -2
+  # 后果是 GPU 永远起不来（显示还能用，因为 DPU 不依赖 GPU 固件）。放到 stage-2 后路径有效，
+  # 同时写进 boot.kernelModules 以保证 fleet 的 pruneKernelModules 不把 msm 从模块树里裁掉。
   boot.initrd.kernelModules = [
     "qcom-refgen-regulator" "cec" "drm_display_helper" "drm_dp_aux_bus"
     "drm_exec" "drm_gpuvm" "gpu-sched" "mdt_loader" "ubwc_config"
-    "msm" "panel-xiaomi-venus-k2"
     "dm-mod"
   ];
+  boot.kernelModules = lib.mkAfter [ "msm" "panel-xiaomi-venus-k2" ];
 
   hardware.graphics = {
     enable = true;

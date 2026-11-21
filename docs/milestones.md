@@ -361,3 +361,37 @@ zram zstd）+ 本版的内存与回收调优。
 2. sysctl 每个 key 是 unique-merge，nixpkgs 已经 `mkDefault` 定义过的键（如 `kernel.kptr_restrict`）
    不能再定义一次，否则 `error: The option … is defined multiple times`。
    逐键 + 只在非 fleet 构建生效（`options ? lantian` 取反），避免与 fleet 的 kernel.nix 撞车。
+
+# M6 · GPU（Adreno 660）跑起来（2026-11-21）
+
+**定义**：stage-2 载入 Adreno 固件，`/dev/dri/renderD128` 上能跑真实渲染循环并出分，
+且显示/WiFi/串口不回退。
+
+| 项 | 值 |
+|---|---|
+| 闭包 | `/nix/store/i92ci8lcb68pnhgwgs6928y4pmalpp9x-nixos-system-venus-26.11pre1122823.04906337b6d5` |
+| boot.img | `7cc56d7dca7109948e5106f7d74a178b`（39796736 字节，boot_a 与 boot_b 同一份，读回校验通过） |
+| DTB | `51c4f6dd3d4cbfc5e95e86a30464dbf2`（仅改 `&gpu_zap_shader` 的 `firmware-name`；上一份 `527c521e5fb792c27608dbfc820f864b`） |
+| 回滚镜像 | `out/boot-prev.img` = 改动前设备上的 boot_b 整份，md5 `6f33dd3a3a1eb2a69fd680ba9757e33a` |
+| 证据 | `dmesg`: `loaded qcom/a660_sqe.fw from new location` / `loaded qcom/a660_gmu.bin` / `[drm] Loaded GMU firmware v3.1.8`，无 `gpu hw init failed`；`/dev/dri/{card1,renderD128}`；`vulkaninfo --summary` → `deviceName = Turnip Adreno (TM) 660` / `Mesa 26.3.0`；`glmark2-es2-drm -b :duration=1` → **Score 188**（多数场景 190~230 FPS，terrain/refract 19~28） |
+| 同时保持 | `card1-DSI-1` connected/enabled、背光 128/255、`wlan0 UP 192.168.0.68/24`（ch60 5300）、`systemctl --failed`=0、`/dev/ttyGS0` 与 `a600000.usb` 绑定 |
+
+**关键改动**（三条缺一条 GPU 就起不来）：
+
+1. 固件必须装在 `lib/firmware/qcom/`：`a660_sqe.fw`、`a660_gmu.bin`、`a660_zap.{mdt,b00,b01,b02}`。
+   上游 linux-firmware 只有 sqe/gmu（还是 `.zst`），a660 的 zap 得从 vendor 分区取，
+   现在随仓库进 git（约 120KB，`.gitignore` 只放行 `qcom/a660_*`）。
+2. `msm` 不在 initrd 里加载。cmdline 的 `firmware_class.path=/run/current-system/firmware`
+   是 stage-2 才建立的符号链接，initrd 里既没有它也没有 `/lib/firmware`，于是
+   `[4.78] Direct firmware load for qcom/a660_sqe.fw failed with error -2` 且不重试；
+   显示照样起来（DPU 不依赖 GPU 固件），所以过去一直以为"GPU 没驱动"。
+   改到 `boot.kernelModules`，fleet 侧用 `mkForce [ "msm" "panel-xiaomi-venus-k2" ]`
+   （仍是白名单，挡住 fleet 组件塞进来的整批模块）。initrd 里不再有 `msm.ko`（已核对）。
+3. DTS 的 `&gpu_zap_shader` 写全路径：`firmware-name = "qcom/a660_zap.mdt"`。
+   adreno 读到这个属性后直接 `request_firmware_direct()`，不走 `adreno_request_fw()` 的
+   qcom/→legacy 兼容逻辑；写裸名会去 `/lib/firmware/a660_zap.mdt` 找 → `Unable to load
+   a660_zap.mdt` → `gpu hw init failed: -2` → GMU OOB 超时。
+
+**部署路径**：`tools/deploy.sh <closure> --boot-img <img>`（现在同时写 boot_b 与 boot_a 并各自
+读回校验；`VENUS_PORT=2222` 走 fleet 的 sshd）。闭包只改了固件与模块加载时机，
+`initrd`/`kernel` 未变以外的六件套 md5 见上表。

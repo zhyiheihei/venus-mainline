@@ -258,3 +258,23 @@ D 轮（最终验收）：闭包 `ikdxzx04…`、boot.img `c04066f9…`，冷启
 `/`=tmpfs、`/nix`=btrfs+compress-force=zstd（225G）、`wlan0 UP 192.168.0.68/24`、
 `systemctl --failed`=0、`udc=configured`/`ttyGS0` 存在、`MHI_CB_EE_RDDM`=0。
 日志：`~/venus-logs/20261119-1600/`。
+
+## 2026-11-21 · GPU（Adreno 660）
+
+| 轮 | 假设 | 唯一变量 | 六件套 md5 | 判据 | 结果 |
+|---|---|---|---|---|---|
+| G1 | GPU 起不来是"固件找不到/加载时机"问题 | 固件落到 `qcom/`（含 zap）+ `msm` 从 initrd 移到 stage-2（同一件事的两半：`firmware_class.path=/run/current-system/firmware` 只在 stage-2 存在，拆开做没有意义） | 闭包 `i92ci8lcb…`、kernel 7.2.6（fleet 预编译 v0.1.0）、initrd 新（无 `msm.ko`）、dtb `527c521e…`、boot.img `6bc9157c…` | dmesg 出现 `loaded qcom/a660_sqe.fw` / `a660_gmu.bin`，且无 `gpu hw init failed` | 🔶 部分成立：sqe/gmu 载入、`Loaded GMU firmware v3.1.8`，但 `Unable to load a660_zap.mdt` → `gpu hw init failed: -2` |
+| G2 | zap 找不到是因为 DT 的 `firmware-name` 少了 `qcom/`（adreno 读到该属性后直接 `request_firmware_direct()`，不走 qcom/→legacy 兼容） | 只改 DTS 一行：`&gpu_zap_shader { firmware-name = "qcom/a660_zap.mdt" }` | 同 G1，仅 dtb `51c4f6dd…`、boot.img `7cc56d7d…` | zap 载入且 glmark2 出分 | ✅ `vulkaninfo` = `Turnip Adreno (TM) 660`；`glmark2-es2-drm -b :duration=1` Score **188**，多数场景 190~230 FPS |
+
+G2 的决定性日志（`dmesg`，同一台设备）：
+
+```
+[   11.955828] msm_dpu ae01000.display-controller: [drm:adreno_request_fw [msm]] loaded qcom/a660_sqe.fw from new location
+[   11.957905] [drm] Loaded GMU firmware v3.1.8
+[   12.219523] msm_dpu ae01000.display-controller: [drm] fb0: msmdrmfb frame buffer device
+```
+
+- G1 的失败句：`adreno_zap_shader_load: Unable to load a660_zap.mdt` 紧接
+  `adreno_load_gpu: gpu hw init failed: -2` 与 `a6xx_gmu_set_oob: Timeout waiting for GMU OOB`。
+- 显示在 G1/G2 都正常（DPU/DSI 与 GPU 固件无关），所以"屏幕上没花屏"不能当作 GPU 成功的判据。
+- 回滚镜像：改动前设备 boot_b 整份留在 `out/boot-prev.img`（md5 `6f33dd3a…`）。

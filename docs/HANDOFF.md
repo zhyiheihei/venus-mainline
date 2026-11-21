@@ -1,31 +1,37 @@
 # 交接文档（写给下一个接手的 agent）
 
-> **最新状态（2026-11-19 17:24，里程碑 M4）：fleet 版跑通** —— `nixos-config` 里的
-> `nixosConfigurations.venus`（index 113、LT interconnect、zerotier ONLINE）在真机上起来了，
-> WiFi 由 sops 提供口令，`/` = tmpfs、`/nix` = btrfs(225G)。细节见 `docs/milestones.md` 的 M4。
-> （M3 = 同一个 fleet 文件系统布局下的 standalone 版，仍可用作逃生镜像。）
+> **最新状态（2026-11-21，里程碑 M6）：GPU 通了** —— Adreno 660 在 stage-2 载入
+> `qcom/a660_{sqe.fw,gmu.bin,zap.mdt}`，`vulkaninfo` 报 `Turnip Adreno (TM) 660`，
+> `glmark2-es2-drm` Score 188。闭包 `i92ci8lcb…`、boot.img
+> `7cc56d7dca7109948e5106f7d74a178b`、DTB `51c4f6dd3d4cbfc5e95e86a30464dbf2`（只改了
+> `&gpu_zap_shader` 的 `firmware-name`）。细节见 `docs/milestones.md` 的 M6。
+> 回滚镜像：`out/boot-prev.img`（= 改动前的 boot_b，md5 `6f33dd3a…`）。
+>
+> **上一条里程碑（2026-11-19，M4/M5）**：`nixos-config` 的 `nixosConfigurations.venus`
+> （index 113、LT interconnect、zerotier ONLINE）在真机上跑通，WiFi 由 sops 提供口令，
+> `/` = tmpfs、`/nix` = btrfs(225G)。M3 = 同一布局下的 standalone 版，仍可作逃生镜像。
 >
 > **SSH 端口是 2222**（fleet 约定）：`ssh -p 2222 root@192.168.0.68`。
 >
-> 当前（M5）闭包 `y7qa61hf7vnizzrr1aick1lkp63mk8y0-nixos-system-venus-26.11.20260914.efe6f07`；
-> boot.img md5 `b88768186beb06eb924695ff7e9123d1`（= `/nix/persistent/boot-milestone.img`），
-> **boot_a 与 boot_b 都写了同一镜像**，dtbo_a/dtbo_b 均为 24MB 全零 —— 单系统但有 A/B 冗余。
-> 存储已扩到整盘：`userdata` = 234.24 GiB（删掉 Android 的 cust/super/vbmeta_system_*/bk010/rescue），
-> `/nix` 235G 总 / 229G 可用。zram 现在是 **zstd 10.8G**（此前被静默降级成 lzo-rle 5.42G）。
+> M5 那轮的旧记录（保留作历史）：闭包
+> `y7qa61hf7vnizzrr1aick1lkp63mk8y0-nixos-system-venus-26.11.20260914.efe6f07`，boot.img
+> `b88768186beb06eb924695ff7e9123d1`（= `/nix/persistent/boot-milestone.img`）。
+> **boot_a 与 boot_b 都写同一镜像**，dtbo_a/dtbo_b 均为 24MB 全零 —— 单系统但有 A/B 冗余。
+> 存储已扩到整盘：`userdata` = 234.24 GiB，`/nix` 235G 总 / 229G 可用，zram = zstd 10.8G。
 >
 > **调试版 vs 正式版**：`venus.debug.enable` 现在是唯一的开关（`lib.mkDefault false`）。
 > 调试版 = `nixosConfigurations.venus-debug`（带 debug 内核 + 全部诊断单元 + 串口 root 免密 +
 > initrd 免密 shell + deadman 自动回滚）；正式版 = 普通设备（无周期诊断、无自动改引导）。
 > 无网无串口时要现场证据，就切到调试版构建。
 > 逃生镜像（M3 standalone）：`/nix/persistent/boot-standalone-m3.img`，md5 `dad167af087c9d9cc5d59e97b033e324`。
-> DTB md5 `527c521e5fb792c27608dbfc820f864b`（两个版本同一份）。
+> DTB md5 `51c4f6dd3d4cbfc5e95e86a30464dbf2`（M6 起；之前是 `527c521e…`）。
 >
 > 置信度约定：✅ = 今天带命令实测过；🔶 = 推断或历史记录、用前请复验。
 
 ## 一、当前设备状态（✅ 2026-11-19 15:57 冷启动后实测）
 
 - 小米 11（venus / SM8350），**12GB 内存**（旧 8GB 机已报废）。槽位 a=Android(EvoX)、b=NixOS；
-  本项目只用 `boot_b`，`boot_a` 不刷不切。
+  2026-11-19 起两个槽都写同一份 boot.img（b 槽起不来时 ABL 回落 a 槽），`tools/deploy.sh` 会逐个读回校验。
 - 文件系统：`/` = tmpfs（`size=80%,mode=755`）、`/nix` = btrfs label `NIXOS_NIX`
   （`compress-force=zstd:3,autodefrag`，已扩到整块 **225G，可用 221G**）、持久化在 `/nix/persistent`。
 - WiFi：`wlan0 UP 192.168.0.68/24`，SSID `moli-1004-backup`、**freq 5300（ch60）**、

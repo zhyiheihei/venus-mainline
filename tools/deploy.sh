@@ -4,7 +4,9 @@
 #   tools/deploy.sh <closure> [--boot-img <img>] [--no-reboot]
 #   tools/deploy.sh <closure> --build-boot-img        # 用 tools/boot-img.sh 现组 boot.img
 #
-# 做四件事：推闭包 → （可选）写 boot_b 并读回校验 → 切 system profile + 建 GC 根 → 重启
+# 做四件事：推闭包 → （可选）写 boot_b 与 boot_a 并逐个读回校验 → 切 system profile + 建 GC 根 → 重启
+#
+# 端口：VENUS_PORT（standalone 版 sshd 在 22，fleet 版在 2222）。
 #
 # 为什么必须切 profile 并建 GC 根：`nix copy` 不创建 root，nix.gc 会删掉不可达路径，
 # 推上去的闭包会被清空（表现为下次启动 bash 不存在、getty 无限登录提示）。
@@ -16,7 +18,9 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 ip=${VENUS_IP:-192.168.0.68}
 user=${VENUS_USER:-root}
-sshopt=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityAgent=none)
+port=${VENUS_PORT:-22}
+sshopt=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityAgent=none -p "$port")
+scpopt=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o LogLevel=ERROR -P "$port")
 
 closure=${1:?'usage: deploy.sh <closure> [--boot-img <img>|--build-boot-img] [--no-reboot]'}
 shift
@@ -33,7 +37,7 @@ done
 [ -e "$closure/init" ] || { echo "闭包不存在: $closure" >&2; exit 1; }
 
 echo "== 推闭包 $closure"
-nix copy --no-check-sigs --to "ssh://$user@$ip" "$closure"
+nix copy --no-check-sigs --to "ssh://$user@$ip:$port" "$closure"
 
 # 硬性前置检查：boot.img 里写死的 init= 必须真的在设备的 store 里存在。
 # 2026-11-19 踩过：先 nix copy 旧闭包 → 重建得到新闭包 → 直接 flash 新 boot.img，
@@ -59,18 +63,22 @@ fi
 if [ -n "$img" ]; then
   [ -f "$img" ] || { echo "boot.img 不存在: $img" >&2; exit 1; }
   size=$(stat -c %s "$img"); md5=$(md5sum "$img" | cut -c1-32)
-  echo "== 写 boot_b: $img ($size 字节, md5 $md5)"
-  scp "${sshopt[@]/-o/-o}" "$img" "$user@$ip:/nix/persistent/boot-deploy.img" >/dev/null
-  remote=$(ssh "${sshopt[@]}" "$user@$ip" "
-    set -e
-    md5sum /nix/persistent/boot-deploy.img | cut -c1-32
-    dd if=/nix/persistent/boot-deploy.img of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync 2>/dev/null
-    sync
-    head -c $size /dev/disk/by-partlabel/boot_b | md5sum | cut -c1-32
-    rm -f /nix/persistent/boot-deploy.img
-  " | tr -d '\r' | tail -1)
-  [ "$remote" = "$md5" ] || { echo "✗ boot_b 读回 md5 不符（写前 $md5，读回 $remote），停止" >&2; exit 1; }
-  echo "   boot_b 读回校验通过: $remote"
+  echo "== 写 boot_b + boot_a: $img ($size 字节, md5 $md5)"
+  scp "${scpopt[@]}" "$img" "$user@$ip:/nix/persistent/boot-deploy.img" >/dev/null
+  # 两个槽写同一份（AGENTS 第 16 节）：b 槽起不来时 ABL 回落 a 槽，a 槽必须是新 initrd。
+  for slot in boot_b boot_a; do
+    remote=$(ssh "${sshopt[@]}" "$user@$ip" "
+      set -e
+      md5sum /nix/persistent/boot-deploy.img | cut -c1-32
+      dd if=/nix/persistent/boot-deploy.img of=/dev/disk/by-partlabel/$slot bs=1M conv=fsync 2>/dev/null
+      sync
+      head -c $size /dev/disk/by-partlabel/$slot | md5sum | cut -c1-32
+    " | tr -d '\r' | tail -1)
+    [ "$remote" = "$md5" ] || { echo "✗ $slot 读回 md5 不符（写前 $md5，读回 $remote），停止" >&2; exit 1; }
+    echo "   $slot 读回校验通过: $remote"
+    sleep 3
+  done
+  ssh "${sshopt[@]}" "$user@$ip" 'rm -f /nix/persistent/boot-deploy.img'
 fi
 
 echo "== 切 profile + GC 根"

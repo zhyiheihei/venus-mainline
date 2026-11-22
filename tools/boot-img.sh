@@ -26,6 +26,17 @@ done
 [ -e "$closure/kernel" ] || { echo "闭包缺 kernel: $closure" >&2; exit 1; }
 [ -e "$closure/initrd" ] || { echo "闭包缺 initrd: $closure" >&2; exit 1; }
 
+# 新闭包自带 `venus-boot.img`（由 nixos/boot-image.nix 在构建期用同一份 mkbootimg
+# 组好，kernel/DTB/initrd/cmdline 全部取自该闭包）。有它就直接用，避免这里再拼
+# 一遍 cmdline 而产生第二个真相。--dtb/--init/--shell 这类覆盖需求仍走下面手拼路径。
+if [ -z "$dtb" ] && [ -z "$init_path" ] && [ "$shell_req" = 0 ] && [ -f "$closure/venus-boot.img" ]; then
+  cp "$closure/venus-boot.img" "$out"
+  echo "out=$out size=$(stat -c %s "$out") md5=$(md5sum "$out" | cut -c1-32)"
+  echo "source=$closure/venus-boot.img（构建期生成，无需手拼）"
+  echo "closure=$closure"
+  exit 0
+fi
+
 dtb=${dtb:-$closure/dtbs/qcom/sm8350-xiaomi-venus.dtb}
 [ -e "$dtb" ] || { echo "DTB 不存在: $dtb" >&2; exit 1; }
 
@@ -74,6 +85,11 @@ if [ "$from_kp" = 1 ] && [ -f "$closure/kernel-params" ]; then
 else
   cmdline="console=ttyGS0,115200 console=tty0 loglevel=7 consoleblank=0 root=fstab init=$init_path firmware_class.path=/run/current-system/firmware regulator_ignore_unused pd_ignore_unused clk_ignore_unused net.ifnames=0"
 fi
+
+# $kp 结尾带空格、$board 可能为空，会拼出双空格。归一化，保证与
+# nixos/boot-image.nix 在构建期拼的 cmdline 逐字节一致（否则同一闭包两份
+# boot.img 的 md5 不同，验收时无法直接对比）。
+cmdline=$(printf '%s' "$cmdline" | tr -s ' ')
 
 # --shell：给 initrd 一个诊断用 root shell（nixos/venus-hardware.nix 里按 cmdline 判断）
 [ "$shell_req" = 1 ] && cmdline="$cmdline venus.shell=1"

@@ -7,7 +7,12 @@ let
   wifiMac = "02:11:22:3c:4d:5e";
 in
 {
-  imports = [ ./hardware-configuration.nix ./venus-hardware.nix ];
+  imports = [
+    ./hardware-configuration.nix
+    ./venus-hardware.nix
+    ./boot-image.nix
+    ./boot-sync.nix
+  ];
 
   venus.debug.enable = lib.mkDefault false;
 

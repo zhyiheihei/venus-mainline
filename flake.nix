@@ -55,6 +55,8 @@
           imports = [
             ./nixos/venus-hardware.nix
             ./nixos/venus-fleet.nix
+            ./nixos/boot-image.nix
+            ./nixos/boot-sync.nix
           ];
           boot.kernelPackages = inputs.nixpkgs.lib.mkForce (venusKernelPackages false);
         };

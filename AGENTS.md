@@ -69,6 +69,13 @@
    `adreno_request_fw()` 的"先 qcom/ 再 legacy"兼容；写裸名就去 `/lib/firmware/a660_zap.mdt` 找，
    结果是 `Unable to load a660_zap.mdt` + `gpu hw init failed: -2`。上游同机型同样带前缀
    （`sm8250-xiaomi-elish`: `qcom/sm8250/xiaomi/elish/a650_zap.mbn`）。
+11. **GNU `stat -c %s` 是 lstat**，不跟随符号链接；闭包里的 `venus-boot.img` 是 `ln -s`，
+    用 `stat -c %s` 只会拿到 58（链接路径长度）→ `venus-boot-sync` 判 "image too small" 跳过。
+    必须 `stat -L -c %s`。任何对闭包内文件求 `%s` 的地方同理。
+12. **内核 derivation 的输入必须内容寻址**：`${../kernel/venus}`、`${../tools/apply-kernel-patches.sh}`、
+    `${./kernel-config}` 这类路径会把整棵 flake 源码树的哈希带进内核，于是任何提交都重编内核、
+    boot.img 跟着变、又得刷机（2026-11-21 实证）。现在统一走 `nixos/linux-source.nix`
+    （filterSource + writeText）。新增内核输入时照此办理。
 
 ## 0. 范围
 
@@ -85,6 +92,7 @@
 | fastboot（内置超时，无设备返回 3） | `tools/win-fastboot.sh devices` / `"flash boot_b C:/…"` |
 | 从闭包组装 boot.img（cmdline 唯一来源） | `tools/boot-img.sh <closure> <out.img> [--dtb <dtb>]` |
 | 部署（推闭包 + 可选 dd 写 boot_b/boot_a 并逐个读回校验 + 切 profile/GC 根 + 重启，全程 SSH 不碰 fastboot） | `tools/deploy.sh <closure> [--boot-img <img>\|--build-boot-img] [--no-reboot]`（`VENUS_PORT=2222` 用于 fleet） |
+| 日常部署（fleet）：激活时由 `venus-boot-sync` 自己写两个槽 | `make` / `nix run .#colmena -- apply --no-substitute --on venus`（在 `nixos-config`） |
 | 取回完整日志（rsync 设备 `/nix/persistent`，含 initrd/stage-2/diag 三份） | `tools/fetch-logs.sh [目录]` |
 | 经 Windows COM 口给设备发命令（`MI11_WAIT=秒` 可等端口枚举） | `tools/serial.sh "<命令>" [秒]` / `--read` |
 | 从闭包做 btrfs userdata 镜像（sparse，可直接 flash） | `tools/mkbtrfs-img.sh <closure> <out.simg> [--hostkey <file>]` |
@@ -110,11 +118,25 @@
 
 ## 3. 部署优先（尽量不刷机）
 
-内核、DTB、initrd 都在 `boot_b` 里，因此：
+**2026-11-22（M7）起，"刷机"这一步在正常情况下已经不存在**：boot.img 在构建期就放进闭包
+（`$closure/venus-boot.img`），`venus-boot-sync` 在 activation 里把它 dd 进 `boot_b` 再
+`boot_a`，各自读回校验，内容相同则跳过；日志 `/nix/persistent/venus-boot-sync.log`。
+内核输入也改成了内容寻址（见第 0 节第 12 条）。
 
-- **用户态变更**（服务、配置、包、WiFi 凭据、日志服务）→ 不刷机：
-  `tools/deploy.sh <closure>`（推闭包 + 切 profile + 重启）。
-- **只有内核 / DTB / initrd 变更**才重写 `boot_b`：`tools/deploy.sh <closure> --boot-img <img>`。
+| 改了什么 | 结果 |
+|---|---|
+| 文档 / 固件 / 服务 / 配置（用户态） | 闭包换新，kernel / initrd / boot.img **不变** → 不写槽、不需要重启 |
+| 内核 config / DTS / initrd 模块 / `venus-hardware.nix` / `linux-source.nix` | 内核或 initrd 变 → 激活时自动重写两个槽，之后需要一次 `reboot` |
+
+- 日常部署就是 `nixos-config` 里 `make`（colmena）。CN 组走 `--no-substitute`：
+  `nix run .#colmena -- apply --no-substitute --on venus`。
+- **重启要单独做，并且先问一句**：设备常常正在被人使用。`colmena apply` 本身不重启。
+- 判断"这次要不要写槽 / 要不要重启"：比对新旧闭包的 `kernel`、`initrd`、`venus-boot.img`
+  三个 store 路径，相同就不动分区。
+- 手工工具仍可用：`tools/deploy.sh <closure> [--boot-img <img>]`（fleet 用 `VENUS_PORT=2222`）。
+  闭包自带 `venus-boot.img` 时 `tools/boot-img.sh` 直接用它，不再手拼 cmdline。
+- 两条路必须字节相同（已实测 `0112be1d…`）：`$closure/venus-boot.img` vs
+  `tools/boot-img.sh <closure> --dtb <dtb> --init <init> --from-kernel-params`。
 
 ## 4. 设备操作状态机
 

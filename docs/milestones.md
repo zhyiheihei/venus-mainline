@@ -395,3 +395,48 @@ zram zstd）+ 本版的内存与回收调优。
 **部署路径**：`tools/deploy.sh <closure> --boot-img <img>`（现在同时写 boot_b 与 boot_a 并各自
 读回校验；`VENUS_PORT=2222` 走 fleet 的 sshd）。闭包只改了固件与模块加载时机，
 `initrd`/`kernel` 未变以外的六件套 md5 见上表。
+
+## M7（2026-11-22 13:46）：boot.img 进闭包 + 激活时自动写两个槽（不用再手工刷机）
+
+**定义**：`switch-to-configuration`（fleet 的 `colmena apply`）跑完后，boot_a/boot_b 里已经是
+本次闭包的镜像，内核 / initrd / DTB / cmdline 变更不再需要任何手工 dd；同一份镜像重复激活
+则跳过。用户态变更（服务、包、配置、固件、文档）**完全不再触发内核重编**，也就不再触发刷机。
+
+| 项 | 值 |
+|---|---|
+| 闭包 | `/nix/store/3mfcjjfp63gz46z5rqnq8298q2fmzjvf-nixos-system-venus-26.11pre1122823.04906337b6d5` |
+| boot.img | `2aec00a2719c31577f2a35faa6746b4b`（39809024 字节，两个槽读回校验一致） |
+| 证据 | `/nix/persistent/venus-boot-sync.log`：`writing boot_b: 39809024 bytes, was a33773d2…, want 2aec00a2…` → `boot_b verified 2aec00a2…` → `boot_a verified 2aec00a2…` → `boot partitions synced`；随后一次激活 `boot_b already 2aec00a2…` |
+| 重启后 | `readlink -f /run/booted-system` = 上述闭包；GPU `loaded GMU firmware v3.1.8`、`/dev/dri/renderD128`；`wlan0 UP 192.168.0.68/24`；`/dev/ttyGS0` + `serial-getty@ttyGS0` active；`systemctl --failed` = 0 |
+| 回滚 | 被覆盖前的 boot_b 整份在设备 `/nix/persistent/boot-replaced.img`；上一轮验证过的镜像在主机 `out/boot-final.img`（`73f3329e0733b62d12f08c2374bf2421`） |
+
+**关键改动**：
+
+1. `nixos/linux-source.nix`：内核版本/源码/patchset/patchedSrc 的唯一来源。patchset 的输入
+   改成 `filterSource(kernel/venus) + writeText(补丁脚本)`，`kernel-config` 也走 `readFile +
+   writeText`。此前这些是 flake 源码树里的路径，**任何一个提交都会改内核 derivation**
+   （2026-11-21 实证：提交 7 个 a660 固件 → 内核重编 5 分钟 → boot.img md5 变 → 重新刷机）。
+2. `nixos/boot-image.nix`：构建期组出 `$closure/venus-boot.img`。DTB 从 `patchedSrc` 里就地
+   cpp+dtc 编；cmdline 由 `boot.kernelParams` 过滤/去重/补回板级三条得到。
+3. `nixos/boot-sync.nix`：抄 postmarketOS `boot-deploy` 的思路（`findfs PARTLABEL` + `dd` +
+   写前写后 md5）在 activation 里写两个槽，先 b 后 a，各自读回校验；一个开机 oneshot 兜底。
+4. `tools/mkbootimg/`：vendor AOSP mkbootimg（`d2bb0af5ba6d3198a3e99529c97eda1be0b5a093`），
+   构建期与 `tools/boot-img.sh` 共用同一份，避免两套拼装逻辑各自漂移。
+
+**同源验证**（关键，否则"自动刷"等于把不确定性搬进 activation）：
+
+- 同一闭包两条路径产出**字节相同**的镜像：`$closure/venus-boot.img` 与
+  `tools/boot-img.sh <closure> --dtb <dtb> --init … --from-kernel-params` 都是
+  `0112be1de680c681887af76b438213c7`；header 全字段、kernel/ramdisk/dtb 的 sha1、cmdline、
+  extra_cmdline 逐项比对一致。
+- Nix 里 cpp+dtc 编出的 DTB 与内核 kbuild 产物逐字节一致：91603 字节，
+  md5 `51c4f6dd3d4cbfc5e95e86a30464dbf2`（= 上一轮实际部署验收的那份）。
+
+**踩到的两个坑**（已修，都留了日志原句）：
+
+- GNU `stat -c %s` 是 lstat，不跟随符号链接；闭包里的 `venus-boot.img` 是 `ln -s`，
+  于是读到 58 字节 → `image too small (58 bytes), skip`。改用 `stat -L`。
+- 第一次 `colmena apply` 在 "Activating system profile" 后报 `Could not acquire lock`
+  （exit 11），profile 已切但激活步骤失败；同一份闭包手动
+  `switch-to-configuration switch` 返回 0，再跑一次 colmena 就 `Activation successful`。
+  属两次激活重叠，不是配置错误。

@@ -278,3 +278,25 @@ G2 的决定性日志（`dmesg`，同一台设备）：
   `adreno_load_gpu: gpu hw init failed: -2` 与 `a6xx_gmu_set_oob: Timeout waiting for GMU OOB`。
 - 显示在 G1/G2 都正常（DPU/DSI 与 GPU 固件无关），所以"屏幕上没花屏"不能当作 GPU 成功的判据。
 - 回滚镜像：改动前设备 boot_b 整份留在 `out/boot-prev.img`（md5 `6f33dd3a…`）。
+
+## E7（2026-11-22）：boot.img 由闭包自带、激活时自动写槽（单变量：部署路径）
+
+假设：把 boot.img 的组装从"部署前手工"挪到"构建期 + 激活时 dd"，配合内核输入内容寻址，
+则（a）用户态提交不再引起内核/initrd/boot.img 变化，（b）内核变更不再需要手工刷机。
+
+唯一变量：部署方式（`tools/deploy.sh --boot-img` → `colmena apply`）。
+
+判据（事先写死）：
+- L1 `$closure/venus-boot.img` 与 `tools/boot-img.sh` 手工路径产出字节相同；
+- L2 activation 日志里两个槽都 `verified`，且重复激活为 `already`；
+- L3 重启后 `/run/booted-system` = 新闭包，GPU/WiFi/串口不回退。
+
+结果：L1 成立（`0112be1de680c681887af76b438213c7`，39804928 字节，逐段 sha1 相同）；
+L2 成立（见 `/nix/persistent/venus-boot-sync.log` 05:46:38~05:46:56）；
+L3 成立（闭包 `3mfcjjfp…`，`Loaded GMU firmware v3.1.8`、`wlan0 UP 192.168.0.68/24`、
+`serial-getty@ttyGS0` active、`systemctl --failed`=0）。
+
+失败留档：
+- G1 `stat -c %s` 对符号链接返回 58 → `image too small (58 bytes), skip`，未写槽（fail-safe 正确）。
+- G2 首次 colmena apply 在激活阶段 `Could not acquire lock`（exit 11），手动 `switch-to-configuration
+  switch` 返回 0，重跑成功。结论：两次激活重叠，与配置无关。

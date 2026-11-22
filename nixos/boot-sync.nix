@@ -21,7 +21,9 @@ let
 
     [ -n "$img" ] && [ -f "$img" ] || { say "no image ($img), skip"; exit 0; }
     [ "$(head -c 8 "$img")" = "ANDROID!" ] || { say "bad magic in $img, skip"; exit 0; }
-    size=$(stat -c %s "$img")
+    # GNU stat 默认 lstat（不跟随符号链接），闭包里的 venus-boot.img 是符号链接，
+    # 用 -L 取目标大小；否则拿到的是链接本身的长度（58 字节），脚本会误判"镜像太小"。
+    size=$(stat -L -c %s "$img")
     md5=$(md5sum "$img" | cut -c1-32)
     [ "$size" -gt 8388608 ] || { say "image too small ($size bytes), skip"; exit 0; }
 
